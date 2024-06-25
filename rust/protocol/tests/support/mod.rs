@@ -13,11 +13,12 @@ use rand::rngs::OsRng;
 use rand::{CryptoRng, Rng};
 
 use std::ops::RangeFrom;
+use std::result;
 use std::time::SystemTime;
 
 // Deliberately not reusing the constants from `protocol`.
-pub(crate) const PRE_KYBER_MESSAGE_VERSION: u32 = 3;
-pub(crate) const KYBER_AWARE_MESSAGE_VERSION: u32 = 4;
+pub const PRE_KYBER_MESSAGE_VERSION: u32 = 3;
+pub const KYBER_AWARE_MESSAGE_VERSION: u32 = 4;
 
 pub fn test_in_memory_protocol_store() -> Result<InMemSignalProtocolStore, SignalProtocolError> {
     let mut csprng = OsRng;
@@ -33,14 +34,15 @@ pub async fn encrypt(
     remote_address: &ProtocolAddress,
     msg: &str,
 ) -> Result<CiphertextMessage, SignalProtocolError> {
-    message_encrypt(
+    let result = message_encrypt(
         msg.as_bytes(),
         remote_address,
         &mut store.session_store,
         &mut store.identity_store,
         SystemTime::now(),
     )
-    .await
+    .await;
+    Ok(result.unwrap().0)
 }
 
 pub async fn decrypt(
@@ -49,7 +51,7 @@ pub async fn decrypt(
     msg: &CiphertextMessage,
 ) -> Result<Vec<u8>, SignalProtocolError> {
     let mut csprng = OsRng;
-    message_decrypt(
+    let result = message_decrypt(
         msg,
         remote_address,
         &mut store.session_store,
@@ -57,9 +59,12 @@ pub async fn decrypt(
         &mut store.pre_key_store,
         &store.signed_pre_key_store,
         &mut store.kyber_pre_key_store,
+        &mut store.ratchet_key_store,
+        0,
         &mut csprng,
     )
-    .await
+    .await;
+    Ok(result.unwrap().0)
 }
 
 pub async fn create_pre_key_bundle<R: Rng + CryptoRng>(

@@ -237,6 +237,19 @@ impl SessionState {
         results
     }
 
+    pub(crate) fn get_receiver_ratchet_key(
+        &self,
+    ) -> Result<Option<PublicKey>, InvalidSessionError> {
+        let last_receiver_chain: &session_structure::Chain = self
+            .session
+            .receiver_chains
+            .last()
+            .ok_or(InvalidSessionError("get none last_receiver_chain"))?;
+        let chain_ratchet_key = PublicKey::deserialize(&last_receiver_chain.sender_ratchet_key)
+            .map_err(|_| InvalidSessionError("invalid receiver chain ratchet key"))?;
+        Ok(Some(chain_ratchet_key))
+    }
+
     pub(crate) fn get_receiver_chain(
         &self,
         sender: &PublicKey,

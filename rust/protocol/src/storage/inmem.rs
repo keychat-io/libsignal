@@ -126,6 +126,7 @@ impl Default for InMemPreKeyStore {
 
 #[async_trait(?Send)]
 impl traits::PreKeyStore for InMemPreKeyStore {
+    // also return timestamp
     async fn get_pre_key(&self, id: PreKeyId) -> Result<PreKeyRecord> {
         Ok(self
             .pre_keys
@@ -298,8 +299,98 @@ impl traits::SessionStore for InMemSessionStore {
         &mut self,
         address: &ProtocolAddress,
         record: &SessionRecord,
-    ) -> Result<()> {
+        _my_receiver_address: Option<String>,
+        _to_receiver_address: Option<String>,
+        _sender_ratchet_key: Option<String>,
+    ) -> Result<(u32, Option<Vec<String>>)> {
         self.sessions.insert(address.clone(), record.clone());
+        Ok((0, None))
+    }
+}
+
+/// Reference implementation of [traits::RatchetKeyStore].
+#[derive(Clone)]
+pub struct InMemRatchetKeyStore {
+    store: HashMap<String, Vec<String>>,
+}
+
+impl InMemRatchetKeyStore {
+    /// Create an empty session store.
+    pub fn new() -> Self {
+        Self {
+            store: HashMap::new(),
+        }
+    }
+}
+
+impl Default for InMemRatchetKeyStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait(?Send)]
+impl traits::RatchetKeyStore for InMemRatchetKeyStore {
+    fn load_ratchet_key(&self, their_ephemeral_public: String) -> Result<String> {
+        Ok(self
+            .store
+            .get(&their_ephemeral_public)
+            .ok_or(crate::error::SignalProtocolError::InvalidArgument(
+                "get their_ephemeral_public err of func load_ratchet_key".to_string(),
+            ))?
+            .first()
+            .ok_or(SignalProtocolError::InvalidArgument(
+                "get first their_ephemeral_public err of func load_ratchet_key".to_string(),
+            ))?
+            .to_string())
+    }
+
+    fn store_ratchet_key(
+        &mut self,
+        _address: &ProtocolAddress,
+        _room_id: u32,
+        their_ephemeral_public: String,
+        our_ephemeral_private: String,
+    ) -> Result<()> {
+        if self.store.is_empty() || self.store.get(&their_ephemeral_public).is_none() {
+            self.store
+                .insert(their_ephemeral_public, vec![our_ephemeral_private]);
+            Ok(())
+        } else {
+            let mut list: Vec<String> = self
+                .store
+                .get(&their_ephemeral_public)
+                .ok_or(SignalProtocolError::InvalidArgument(
+                    "get their_ephemeral_public err of func store_ratchet_key".to_string(),
+                ))?
+                .to_vec();
+            list.push(our_ephemeral_private);
+            self.store.insert(their_ephemeral_public, list);
+            Ok(())
+        }
+    }
+
+    async fn delete_old_ratchet_key(
+        &self,
+        _id: u32,
+        _address: String,
+        _room_id: u32,
+    ) -> Result<()> {
+        self.store.to_owned().clear();
+        Ok(())
+    }
+
+    async fn get_max_id(&self, _address: &ProtocolAddress, _room_id: u32) -> Result<Option<u32>> {
+        Ok(Some(0))
+    }
+
+    async fn contains_ratchet_key(&self, their_ephemeral_public: String) -> Result<Option<bool>> {
+        let is_contain = self.store.contains_key(&their_ephemeral_public);
+        Ok(Some(is_contain))
+    }
+
+    async fn remove_ratchet_key(&self, their_ephemeral_public: String) -> Result<()> {
+        self.store.to_owned().remove(&their_ephemeral_public);
         Ok(())
     }
 }
@@ -364,6 +455,7 @@ pub struct InMemSignalProtocolStore {
     pub kyber_pre_key_store: InMemKyberPreKeyStore,
     pub identity_store: InMemIdentityKeyStore,
     pub sender_key_store: InMemSenderKeyStore,
+    pub ratchet_key_store: InMemRatchetKeyStore,
 }
 
 impl InMemSignalProtocolStore {
@@ -377,6 +469,7 @@ impl InMemSignalProtocolStore {
             kyber_pre_key_store: InMemKyberPreKeyStore::new(),
             identity_store: InMemIdentityKeyStore::new(key_pair, registration_id),
             sender_key_store: InMemSenderKeyStore::new(),
+            ratchet_key_store: InMemRatchetKeyStore::new(),
         })
     }
 
@@ -488,6 +581,51 @@ impl traits::KyberPreKeyStore for InMemSignalProtocolStore {
 }
 
 #[async_trait(?Send)]
+impl traits::RatchetKeyStore for InMemSignalProtocolStore {
+    fn load_ratchet_key(&self, their_ephemeral_public: String) -> Result<String> {
+        self.ratchet_key_store
+            .load_ratchet_key(their_ephemeral_public)
+    }
+
+    fn store_ratchet_key(
+        &mut self,
+        address: &ProtocolAddress,
+        room_id: u32,
+        their_ephemeral_public: String,
+        our_ephemeral_private: String,
+    ) -> Result<()> {
+        self.ratchet_key_store.store_ratchet_key(
+            address,
+            room_id,
+            their_ephemeral_public,
+            our_ephemeral_private,
+        )
+    }
+
+    async fn delete_old_ratchet_key(&self, id: u32, address: String, room_id: u32) -> Result<()> {
+        self.ratchet_key_store
+            .delete_old_ratchet_key(id, address, room_id)
+            .await
+    }
+
+    async fn get_max_id(&self, address: &ProtocolAddress, room_id: u32) -> Result<Option<u32>> {
+        self.ratchet_key_store.get_max_id(address, room_id).await
+    }
+
+    async fn contains_ratchet_key(&self, their_ephemeral_public: String) -> Result<Option<bool>> {
+        self.ratchet_key_store
+            .contains_ratchet_key(their_ephemeral_public)
+            .await
+    }
+
+    async fn remove_ratchet_key(&self, their_ephemeral_public: String) -> Result<()> {
+        self.ratchet_key_store
+            .remove_ratchet_key(their_ephemeral_public)
+            .await
+    }
+}
+
+#[async_trait(?Send)]
 impl traits::SessionStore for InMemSignalProtocolStore {
     async fn load_session(&self, address: &ProtocolAddress) -> Result<Option<SessionRecord>> {
         self.session_store.load_session(address).await
@@ -497,8 +635,19 @@ impl traits::SessionStore for InMemSignalProtocolStore {
         &mut self,
         address: &ProtocolAddress,
         record: &SessionRecord,
-    ) -> Result<()> {
-        self.session_store.store_session(address, record).await
+        my_receiver_address: Option<String>,
+        to_receiver_address: Option<String>,
+        sender_ratchet_key: Option<String>,
+    ) -> Result<(u32, Option<Vec<String>>)> {
+        self.session_store
+            .store_session(
+                address,
+                record,
+                my_receiver_address,
+                to_receiver_address,
+                sender_ratchet_key,
+            )
+            .await
     }
 }
 
@@ -525,5 +674,4 @@ impl traits::SenderKeyStore for InMemSignalProtocolStore {
             .await
     }
 }
-
 impl traits::ProtocolStore for InMemSignalProtocolStore {}

@@ -83,6 +83,7 @@ pub use state::{
 };
 pub use storage::{
     Direction, IdentityKeyStore, InMemIdentityKeyStore, InMemKyberPreKeyStore, InMemPreKeyStore,
-    InMemSenderKeyStore, InMemSessionStore, InMemSignalProtocolStore, InMemSignedPreKeyStore,
-    KyberPreKeyStore, PreKeyStore, ProtocolStore, SenderKeyStore, SessionStore, SignedPreKeyStore,
+    InMemRatchetKeyStore, InMemSenderKeyStore, InMemSessionStore, InMemSignalProtocolStore,
+    InMemSignedPreKeyStore, KyberPreKeyStore, PreKeyStore, ProtocolStore, RatchetKeyStore,
+    SenderKeyStore, SessionStore, SignedPreKeyStore,
 };
