@@ -233,7 +233,7 @@ pub async fn process_prekey_bundle<R: Rng + CryptoRng>(
     session_record.promote_state(session);
 
     session_store
-        .store_session(remote_address, &session_record)
+        .store_session(remote_address, &session_record, None, None, None)
         .await?;
 
     Ok(())

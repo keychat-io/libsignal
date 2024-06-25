@@ -139,7 +139,33 @@ pub trait SessionStore {
         &mut self,
         address: &ProtocolAddress,
         record: &SessionRecord,
+        my_receiver_address: Option<String>,
+        to_receiver_address: Option<String>,
+        sender_ratchet_key: Option<String>,
+    ) -> Result<(u32, Option<Vec<String>>)>;
+}
+
+/// Interface for storing ratchet key records, allowing multiple keys per user.
+#[async_trait(?Send)]
+pub trait RatchetKeyStore {
+    /// load_ratchet_key
+    fn load_ratchet_key(&self, their_ephemeral_public: String) -> Result<String>;
+    /// store_ratchet_key
+    fn store_ratchet_key(
+        &mut self,
+        address: &ProtocolAddress,
+        room_id: u32,
+        their_ephemeral_public: String,
+        our_ephemeral_private: String,
     ) -> Result<()>;
+    /// delete_old_ratchet_key
+    async fn delete_old_ratchet_key(&self, id: u32, address: String, room_id: u32) -> Result<()>;
+    /// get_max_id
+    async fn get_max_id(&self, address: &ProtocolAddress, room_id: u32) -> Result<Option<u32>>;
+    /// contains_ratchet_key
+    async fn contains_ratchet_key(&self, their_ephemeral_public: String) -> Result<Option<bool>>;
+    /// remove_ratchet_key
+    async fn remove_ratchet_key(&self, their_ephemeral_public: String) -> Result<()>;
 }
 
 /// Interface for storing sender key records, allowing multiple keys per user.
@@ -164,6 +190,11 @@ pub trait SenderKeyStore {
 
 /// Mixes in all the store interfaces defined in this module.
 pub trait ProtocolStore:
-    SessionStore + PreKeyStore + SignedPreKeyStore + KyberPreKeyStore + IdentityKeyStore
+    SessionStore
+    + PreKeyStore
+    + SignedPreKeyStore
+    + KyberPreKeyStore
+    + IdentityKeyStore
+    + RatchetKeyStore
 {
 }

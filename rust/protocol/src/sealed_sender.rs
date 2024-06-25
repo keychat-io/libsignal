@@ -6,8 +6,8 @@
 use crate::{
     message_encrypt, Aci, CiphertextMessageType, DeviceId, Direction, IdentityKey, IdentityKeyPair,
     IdentityKeyStore, KeyPair, KyberPreKeyStore, PreKeySignalMessage, PreKeyStore, PrivateKey,
-    ProtocolAddress, PublicKey, Result, ServiceId, ServiceIdFixedWidthBinaryBytes, SessionRecord,
-    SessionStore, SignalMessage, SignalProtocolError, SignedPreKeyStore,
+    ProtocolAddress, PublicKey, RatchetKeyStore, Result, ServiceId, ServiceIdFixedWidthBinaryBytes,
+    SessionRecord, SessionStore, SignalMessage, SignalProtocolError, SignedPreKeyStore,
 };
 
 use crate::{crypto, curve, proto, session_cipher};
@@ -796,9 +796,9 @@ pub async fn sealed_sender_encrypt<R: Rng + CryptoRng>(
 ) -> Result<Vec<u8>> {
     let message = message_encrypt(ptext, destination, session_store, identity_store, now).await?;
     let usmc = UnidentifiedSenderMessageContent::new(
-        message.message_type(),
+        message.0.message_type(),
         sender_cert.clone(),
-        message.serialize().to_vec(),
+        message.0.serialize().to_vec(),
         ContentHint::Default,
         None,
     )?;
@@ -1982,6 +1982,7 @@ pub async fn sealed_sender_decrypt(
     local_device_id: DeviceId,
     identity_store: &mut dyn IdentityKeyStore,
     session_store: &mut dyn SessionStore,
+    ratchet_key_store: &mut dyn RatchetKeyStore,
     pre_key_store: &mut dyn PreKeyStore,
     signed_pre_key_store: &dyn SignedPreKeyStore,
     kyber_pre_key_store: &mut dyn KyberPreKeyStore,
@@ -2020,6 +2021,8 @@ pub async fn sealed_sender_decrypt(
                 &remote_address,
                 session_store,
                 identity_store,
+                ratchet_key_store,
+                0,
                 &mut rng,
             )
             .await?
@@ -2031,9 +2034,11 @@ pub async fn sealed_sender_decrypt(
                 &remote_address,
                 session_store,
                 identity_store,
+                ratchet_key_store,
                 pre_key_store,
                 signed_pre_key_store,
                 kyber_pre_key_store,
+                0,
                 &mut rng,
             )
             .await?
@@ -2050,7 +2055,7 @@ pub async fn sealed_sender_decrypt(
         sender_uuid: usmc.sender()?.sender_uuid()?.to_string(),
         sender_e164: usmc.sender()?.sender_e164()?.map(|s| s.to_string()),
         device_id: usmc.sender()?.sender_device_id()?,
-        message,
+        message: message.0,
     })
 }
 
