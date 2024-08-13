@@ -23,6 +23,7 @@ pub async fn message_encrypt(
     session_store: &mut dyn SessionStore,
     identity_store: &mut dyn IdentityKeyStore,
     now: SystemTime,
+    is_kdf: Option<bool>,
 ) -> Result<(
     CiphertextMessage,
     Option<String>,
@@ -154,6 +155,11 @@ pub async fn message_encrypt(
         return Err(SignalProtocolError::UntrustedIdentity(
             remote_address.clone(),
         ));
+    }
+
+    let is_kdf = is_kdf.unwrap_or(false);
+    if is_kdf {
+        session_state.clear_unacknowledged_pre_key_message();
     }
 
     // XXX this could be combined with the above call to the identity store (in a new API)
