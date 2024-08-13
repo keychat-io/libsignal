@@ -72,6 +72,11 @@ pub async fn message_encrypt(
                 SignalProtocolError::InvalidSessionStructure("invalid sender chain message keys")
             })?;
 
+    let is_kdf = is_kdf.unwrap_or(false);
+    if is_kdf {
+        session_state.clear_unacknowledged_pre_key_message();
+    }
+
     let message = if let Some(items) = session_state.unacknowledged_pre_key_message_items()? {
         let timestamp_as_unix_time = items
             .timestamp()
@@ -155,11 +160,6 @@ pub async fn message_encrypt(
         return Err(SignalProtocolError::UntrustedIdentity(
             remote_address.clone(),
         ));
-    }
-
-    let is_kdf = is_kdf.unwrap_or(false);
-    if is_kdf {
-        session_state.clear_unacknowledged_pre_key_message();
     }
 
     // XXX this could be combined with the above call to the identity store (in a new API)
