@@ -23,6 +23,7 @@ pub async fn message_encrypt(
     session_store: &mut dyn SessionStore,
     identity_store: &mut dyn IdentityKeyStore,
     now: SystemTime,
+    is_kdf: Option<bool>,
 ) -> Result<(
     CiphertextMessage,
     Option<String>,
@@ -70,6 +71,11 @@ pub async fn message_encrypt(
                 log::error!("session state corrupt for {}", remote_address);
                 SignalProtocolError::InvalidSessionStructure("invalid sender chain message keys")
             })?;
+
+    let is_kdf = is_kdf.unwrap_or(false);
+    if is_kdf {
+        session_state.clear_unacknowledged_pre_key_message();
+    }
 
     let message = if let Some(items) = session_state.unacknowledged_pre_key_message_items()? {
         let timestamp_as_unix_time = items
