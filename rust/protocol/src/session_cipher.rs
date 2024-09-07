@@ -757,7 +757,9 @@ fn get_or_create_chain_key<R: Rng + CryptoRng>(
         log::warn!("{} has existing receiver chain.", remote_address);
         let our_ephemeral =
             ratchet_key_store.load_ratchet_key(hex::encode(their_ephemeral.serialize()))?;
-        let our_ephemeral_decode = hex::decode(our_ephemeral).expect("private decode error");
+        let our_ephemeral_decode = hex::decode(our_ephemeral).map_err(|_| {
+            SignalProtocolError::InvalidArgument("our_ephemeral_decode decode error".to_string())
+        })?;
         let our_ephemeral_private = PrivateKey::deserialize(&our_ephemeral_decode.to_owned())?;
         let to_receiver_address = bytes_to_hex(
             our_ephemeral_private.serialize(),
@@ -769,14 +771,12 @@ fn get_or_create_chain_key<R: Rng + CryptoRng>(
     // log::info!("{} creating new chains.", remote_address);
     let root_key = state.root_key()?;
     let our_ephemeral = state.sender_ratchet_private_key()?;
-    ratchet_key_store
-        .store_ratchet_key(
-            remote_address,
-            room_id,
-            hex::encode(their_ephemeral.serialize()),
-            hex::encode(our_ephemeral.serialize()),
-        )
-        .expect("func [get_or_create_chain_key] store_ratchet_key error");
+    ratchet_key_store.store_ratchet_key(
+        remote_address,
+        room_id,
+        hex::encode(their_ephemeral.serialize()),
+        hex::encode(our_ephemeral.serialize()),
+    )?;
     let to_receiver_address = bytes_to_hex(our_ephemeral.serialize(), their_ephemeral.serialize())?;
     let receiver_chain = root_key.create_chain(their_ephemeral, &our_ephemeral)?;
     let our_new_ephemeral = KeyPair::generate(csprng);
