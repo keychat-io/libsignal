@@ -331,7 +331,7 @@ impl Default for InMemRatchetKeyStore {
 
 #[async_trait(?Send)]
 impl traits::RatchetKeyStore for InMemRatchetKeyStore {
-    fn load_ratchet_key(&self, their_ephemeral_public: String) -> Result<String> {
+    async fn load_ratchet_key(&self, their_ephemeral_public: String) -> Result<String> {
         Ok(self
             .store
             .get(&their_ephemeral_public)
@@ -345,7 +345,7 @@ impl traits::RatchetKeyStore for InMemRatchetKeyStore {
             .to_string())
     }
 
-    fn store_ratchet_key(
+    async fn store_ratchet_key(
         &mut self,
         _address: &ProtocolAddress,
         _room_id: u32,
@@ -582,12 +582,12 @@ impl traits::KyberPreKeyStore for InMemSignalProtocolStore {
 
 #[async_trait(?Send)]
 impl traits::RatchetKeyStore for InMemSignalProtocolStore {
-    fn load_ratchet_key(&self, their_ephemeral_public: String) -> Result<String> {
+    async fn load_ratchet_key(&self, their_ephemeral_public: String) -> Result<String> {
         self.ratchet_key_store
-            .load_ratchet_key(their_ephemeral_public)
+            .load_ratchet_key(their_ephemeral_public).await
     }
 
-    fn store_ratchet_key(
+    async fn store_ratchet_key(
         &mut self,
         address: &ProtocolAddress,
         room_id: u32,
@@ -599,7 +599,7 @@ impl traits::RatchetKeyStore for InMemSignalProtocolStore {
             room_id,
             their_ephemeral_public,
             our_ephemeral_private,
-        )
+        ).await
     }
 
     async fn delete_old_ratchet_key(&self, id: u32, address: String, room_id: u32) -> Result<()> {

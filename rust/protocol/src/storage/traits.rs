@@ -149,9 +149,9 @@ pub trait SessionStore {
 #[async_trait(?Send)]
 pub trait RatchetKeyStore {
     /// load_ratchet_key
-    fn load_ratchet_key(&self, their_ephemeral_public: String) -> Result<String>;
+    async fn load_ratchet_key(&self, their_ephemeral_public: String) -> Result<String>;
     /// store_ratchet_key
-    fn store_ratchet_key(
+    async fn store_ratchet_key(
         &mut self,
         address: &ProtocolAddress,
         room_id: u32,

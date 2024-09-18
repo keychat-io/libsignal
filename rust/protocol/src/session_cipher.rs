@@ -286,7 +286,7 @@ pub async fn message_decrypt_prekey<R: Rng + CryptoRng>(
         CiphertextMessageType::PreKey,
         room_id,
         csprng,
-    )?;
+    ).await?;
 
     let result = session_store
         .store_session(
@@ -333,7 +333,7 @@ pub async fn message_decrypt_signal<R: Rng + CryptoRng>(
         CiphertextMessageType::Whisper,
         room_id,
         csprng,
-    )?;
+    ).await?;
 
     // Why are we performing this check after decryption instead of before?
     let their_identity_key = session_record
@@ -470,7 +470,7 @@ fn create_decryption_failure_log(
     Ok(lines.join("\n"))
 }
 
-fn decrypt_message_with_record<R: Rng + CryptoRng>(
+async fn decrypt_message_with_record<R: Rng + CryptoRng>(
     remote_address: &ProtocolAddress,
     ratchet_key_store: &mut dyn RatchetKeyStore,
     record: &mut SessionRecord,
@@ -516,7 +516,7 @@ fn decrypt_message_with_record<R: Rng + CryptoRng>(
             ratchet_key_store,
             room_id,
             csprng,
-        );
+        ).await;
 
         match result {
             Ok((ptext, to_receiver_address, their_ephemeral, msg_keys_hash)) => {
@@ -556,7 +556,7 @@ fn decrypt_message_with_record<R: Rng + CryptoRng>(
             ratchet_key_store,
             room_id,
             csprng,
-        );
+        ).await;
 
         match result {
             Ok((ptext, to_receiver_address, their_ephemeral, msg_keys_hash)) => {
@@ -643,7 +643,7 @@ impl std::fmt::Display for CurrentOrPrevious {
     }
 }
 
-fn decrypt_message_with_state<R: Rng + CryptoRng>(
+async fn decrypt_message_with_state<R: Rng + CryptoRng>(
     current_or_previous: CurrentOrPrevious,
     state: &mut SessionState,
     ciphertext: &SignalMessage,
@@ -677,7 +677,7 @@ fn decrypt_message_with_state<R: Rng + CryptoRng>(
         ratchet_key_store,
         room_id,
         csprng,
-    )?;
+    ).await?;
 
     log::info!("to_receiver_address {}", to_receiver_address);
     let message_keys = get_or_create_message_key(
@@ -745,7 +745,7 @@ fn decrypt_message_with_state<R: Rng + CryptoRng>(
     ))
 }
 
-fn get_or_create_chain_key<R: Rng + CryptoRng>(
+async fn get_or_create_chain_key<R: Rng + CryptoRng>(
     state: &mut SessionState,
     their_ephemeral: &PublicKey,
     remote_address: &ProtocolAddress,
@@ -756,7 +756,7 @@ fn get_or_create_chain_key<R: Rng + CryptoRng>(
     if let Some(chain) = state.get_receiver_chain_key(their_ephemeral)? {
         log::warn!("{} has existing receiver chain.", remote_address);
         let our_ephemeral =
-            ratchet_key_store.load_ratchet_key(hex::encode(their_ephemeral.serialize()))?;
+            ratchet_key_store.load_ratchet_key(hex::encode(their_ephemeral.serialize())).await?;
         let our_ephemeral_decode = hex::decode(our_ephemeral).map_err(|_| {
             SignalProtocolError::InvalidArgument("our_ephemeral_decode decode error".to_string())
         })?;
@@ -776,7 +776,7 @@ fn get_or_create_chain_key<R: Rng + CryptoRng>(
         room_id,
         hex::encode(their_ephemeral.serialize()),
         hex::encode(our_ephemeral.serialize()),
-    )?;
+    ).await?;
     let to_receiver_address = bytes_to_hex(our_ephemeral.serialize(), their_ephemeral.serialize())?;
     let receiver_chain = root_key.create_chain(their_ephemeral, &our_ephemeral)?;
     let our_new_ephemeral = KeyPair::generate(csprng);
