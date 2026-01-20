@@ -3,15 +3,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+use partial_default::PartialDefault;
+use serde::{Deserialize, Serialize, Serializer};
+
 use crate::common::constants::*;
 use crate::common::errors::*;
 use crate::common::serialization::VersionByte;
 use crate::common::simple_types::*;
 use crate::{api, crypto};
-use partial_default::PartialDefault;
-use serde::{Deserialize, Serialize, Serializer};
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct ProfileKeyCredentialPresentationV1 {
     pub(crate) version: u8, // Not ReservedByte or VersionByte to allow deserializing a V2 presentation as V1.
     pub(crate) proof: crypto::proofs::ProfileKeyCredentialPresentationProofV1,
@@ -36,7 +37,7 @@ impl ProfileKeyCredentialPresentationV1 {
 }
 
 /// Like [`ProfileKeyCredentialPresentationV1`], but with an optimized proof.
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct ProfileKeyCredentialPresentationV2 {
     pub(crate) version: VersionByte<PRESENTATION_VERSION_2>,
     pub(crate) proof: crypto::proofs::ProfileKeyCredentialPresentationProofV2,
@@ -60,7 +61,7 @@ impl ProfileKeyCredentialPresentationV2 {
     }
 }
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct ExpiringProfileKeyCredentialPresentation {
     pub(crate) version: VersionByte<PRESENTATION_VERSION_3>,
     pub(crate) proof: crypto::proofs::ExpiringProfileKeyCredentialPresentationProof,
@@ -89,6 +90,7 @@ impl ExpiringProfileKeyCredentialPresentation {
     }
 }
 
+#[derive(derive_more::From)]
 pub enum AnyProfileKeyCredentialPresentation {
     V1(ProfileKeyCredentialPresentationV1),
     V2(ProfileKeyCredentialPresentationV2),
@@ -174,21 +176,5 @@ impl Serialize for AnyProfileKeyCredentialPresentation {
                 presentation.serialize(serializer)
             }
         }
-    }
-}
-
-impl From<ProfileKeyCredentialPresentationV1> for AnyProfileKeyCredentialPresentation {
-    fn from(presentation: ProfileKeyCredentialPresentationV1) -> Self {
-        Self::V1(presentation)
-    }
-}
-impl From<ProfileKeyCredentialPresentationV2> for AnyProfileKeyCredentialPresentation {
-    fn from(presentation: ProfileKeyCredentialPresentationV2) -> Self {
-        Self::V2(presentation)
-    }
-}
-impl From<ExpiringProfileKeyCredentialPresentation> for AnyProfileKeyCredentialPresentation {
-    fn from(presentation: ExpiringProfileKeyCredentialPresentation) -> Self {
-        Self::V3(presentation)
     }
 }

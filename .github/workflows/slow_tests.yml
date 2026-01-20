@@ -1,7 +1,11 @@
-name: Slow Tests
+name: "Integration - Slow Tests"
 
 env:
-  LIBSIGNAL_TESTING_ENCLAVE_SECRET: ${{secrets.SVR_ENCLAVE_SECRET}}
+  ANDROID_NDK_VERSION: 28.0.13004108
+  LIBSIGNAL_TESTING_CDSI_ENCLAVE_SECRET: ${{secrets.CDSI_ENCLAVE_SECRET}}
+  LIBSIGNAL_TESTING_PROXY_SERVER: ${{secrets.LIBSIGNAL_TESTING_PROXY_SERVER}}
+  LIBSIGNAL_TESTING_RUN_NONHERMETIC_TESTS: true
+  LIBSIGNAL_TESTING_SVRB_ENCLAVE_SECRET: ${{secrets.LIBSIGNAL_TESTING_SVRB_ENCLAVE_SECRET}}
 
 on:
   schedule:
@@ -11,39 +15,46 @@ on:
     # We pick 8:25 UTC, aiming for "later than PST/UTC-8 night work" and
     # "earlier than ADT/UTC-3 morning work".
     - cron: '25 8 * * *'
-  workflow_dispatch: {} # no parameters
+  workflow_dispatch:
+    inputs:
+      ios_runner:
+        description: 'Runner for iOS tests'
+        required: true
+        # This is redundant with specifying it at the use site, but makes it appear in the website UI.
+        # See https://github.com/actions/runner-images/blob/main/README.md#available-images
+        default: 'macos-15-xlarge'
+      ignore_kt_tests:
+        type: boolean
+        description: 'Skip Key Transparency tests (sets LIBSIGNAL_TESTING_IGNORE_KT_TESTS)'
+        default: false
+      bigger_workers:
+        type: boolean
+        description: 'Run on larger, more expensive workers for faster results'
+        default: false
 
 jobs:
-  check-up-to-date:
-    name: Already up to date?
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'schedule' && github.repository_owner == 'signalapp' && endsWith(github.repository, '-private') }}
-    outputs:
-      has-changes: ${{ steps.check.outputs.has-changes }}
-    steps:
-    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
-      with:
-        submodules: recursive
-    - run: git log --after '24 hours ago' --exit-code || echo 'has-changes=true' >> $GITHUB_OUTPUT
-      id: check
-
   java-docker:
     name: Java (Docker)
-    runs-on: ubuntu-latest
-    needs: [check-up-to-date]
-    if: ${{ always() && (needs.check-up-to-date.outputs.has-changes || github.event_name != 'schedule') }}
+    runs-on: ${{ inputs.bigger_workers == true && 'ubuntu-latest-8-cores' || 'ubuntu-latest-4-cores' }}
+    if: ${{ github.event_name != 'schedule' || (github.repository_owner == 'signalapp' && endsWith(github.repository, '-private')) }}
     timeout-minutes: 60
 
     steps:
     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       with:
         submodules: recursive
+    - name: Enable KT skip flag
+      if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.ignore_kt_tests == true) }}
+      run: echo "LIBSIGNAL_TESTING_IGNORE_KT_TESTS=true" >> "$GITHUB_ENV"
+    - name: Print KT env toggle
+      run: |
+        echo "LIBSIGNAL_TESTING_IGNORE_KT_TESTS=${LIBSIGNAL_TESTING_IGNORE_KT_TESTS:-<unset>}"
     - run: make -C java
     - name: Upload JNI libraries
       uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       with:
         name: jniLibs
-        path: java/android/src/androidTest/jniLibs/*
+        path: java/android/src/main/jniLibs/*
         retention-days: 2
     - name: Upload full JARs
       uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
@@ -60,15 +71,17 @@ jobs:
 
   java-docker-secondary:
     name: Java (Secondary Docker)
-    runs-on: ubuntu-latest
-    needs: [check-up-to-date]
-    if: ${{ always() && (needs.check-up-to-date.outputs.has-changes || github.event_name != 'schedule') }}
+    runs-on: ${{ inputs.bigger_workers == true && 'ubuntu-latest-8-cores' || 'ubuntu-latest-4-cores' }}
+    if: ${{ github.event_name != 'schedule' || (github.repository_owner == 'signalapp' && endsWith(github.repository, '-private')) }}
     timeout-minutes: 60
 
     steps:
     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       with:
         submodules: recursive
+    - name: Enable KT skip flag
+      if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.ignore_kt_tests == true) }}
+      run: echo "LIBSIGNAL_TESTING_IGNORE_KT_TESTS=true" >> "$GITHUB_ENV"
     - run: make -C java
     - name: Upload full JARs
       uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
@@ -84,10 +97,10 @@ jobs:
         retention-days: 2
 
   java-reproducibility:
-    name: Verify Reproducible Build
+    name: Verify Java Reproducible Build
     runs-on: ubuntu-latest
     needs: [java-docker, java-docker-secondary]
-    if: ${{ always() && needs.java-docker.result == 'success' && needs.java-docker-secondary.result == 'success' }}
+    if: ${{ needs.java-docker.result == 'success' && needs.java-docker-secondary.result == 'success' }}
 
     steps:
       - name: Download jars
@@ -112,21 +125,55 @@ jobs:
           path: b/aars/
       - run: diff -qr a/ b/
 
+  java-extra-bridging-checks:
+    name: Java with runtime bridging checks
+    runs-on: ubuntu-latest-4-cores
+    if: ${{ github.event_name != 'schedule' || (github.repository_owner == 'signalapp' && endsWith(github.repository, '-private')) }}
+    timeout-minutes: 60
+
+    steps:
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
+    - name: Enable KT skip flag
+      if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.ignore_kt_tests == true) }}
+      run: echo "LIBSIGNAL_TESTING_IGNORE_KT_TESTS=true" >> "$GITHUB_ENV"
+
+    - run: sudo apt-get install protobuf-compiler
+
+    - run: ./gradlew :client:test :server:test -PskipAndroid -PjniTypeTagging -PjniCheckAnnotations
+      working-directory: java
+
   android-emulator-tests:
     name: Android Emulator Tests
     # For hardware acceleration; see https://github.blog/changelog/2023-02-23-hardware-accelerated-android-virtualization-on-actions-windows-and-linux-larger-hosted-runners/
-    runs-on: ubuntu-latest-4-cores
+    runs-on: ${{ inputs.bigger_workers == true && 'ubuntu-latest-8-cores' || 'ubuntu-latest-4-cores' }}
+    env:
+      # Proxy server tests will fail on Android API prior to 28
+      LIBSIGNAL_TESTING_PROXY_SERVER: ${{ fromJSON(matrix.api_level) >= 28 && secrets.LIBSIGNAL_TESTING_PROXY_SERVER || '' }}
     needs: [java-docker]
-    if: ${{ always() && needs.java-docker.result == 'success' }}
+    if: ${{ needs.java-docker.result == 'success' }}
     timeout-minutes: 45
 
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86, x86_64]
+        # 23 is our minimal API level
+        # 33 is our target API level
+        include:
+          - api_level: 23
+            arch: x86
+          - api_level: 23
+            arch: x86_64
+          - api_level: 33
+            arch: x86_64
 
     steps:
       - run: 'echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"'
+
+      - name: Enable KT skip flag
+        if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.ignore_kt_tests == true) }}
+        run: echo "LIBSIGNAL_TESTING_IGNORE_KT_TESTS=true" >> "$GITHUB_ENV"
 
       # For hardware acceleration; see https://github.blog/changelog/2023-02-23-hardware-accelerated-android-virtualization-on-actions-windows-and-linux-larger-hosted-runners/
       - name: Enable KVM group perms
@@ -144,43 +191,115 @@ jobs:
         uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427 # v4.1.4
         with:
           name: jniLibs
-          path: java/android/src/androidTest/jniLibs/
+          path: java/android/src/main/jniLibs/
 
       # From reactivecircus/android-emulator-runner
       - name: AVD cache
-        uses: actions/cache@ab5e6d0c87105b4c9c2047343972218f562e4319 # v4.0.1
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         id: avd-cache
         with:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: avd-${{ matrix.arch }}-21-linux
+          key: avd-${{ matrix.arch }}-${{ matrix.api_level }}-linux
 
       - name: Create AVD and generate snapshot for caching
         if: steps.avd-cache.outputs.cache-hit != 'true'
-        uses: reactivecircus/android-emulator-runner@6b0df4b0efb23bb0ec63d881db79aefbc976e4b2 # v2.30.1
+        uses: reactivecircus/android-emulator-runner@62dbb605bba737720e10b196cb4220d374026a6d # v2.33.0
         with:
           arch: ${{ matrix.arch }}
-          api-level: 21
+          api-level: ${{ matrix.api_level }}
+          ndk: ${{ env.ANDROID_NDK_VERSION }}
           force-avd-creation: false
-          emulator-options: -no-window -noaudio -no-boot-anim
+          disk-size: 2048M
+          emulator-options: -no-window -noaudio -no-boot-anim -no-metrics
           script: echo "Generated AVD snapshot for caching."
 
       - name: Run tests
-        uses: reactivecircus/android-emulator-runner@6b0df4b0efb23bb0ec63d881db79aefbc976e4b2 # v2.30.1
+        uses: reactivecircus/android-emulator-runner@62dbb605bba737720e10b196cb4220d374026a6d # v2.33.0
         with:
           arch: ${{ matrix.arch }}
-          api-level: 21
+          api-level: ${{ matrix.api_level }}
+          ndk: ${{ env.ANDROID_NDK_VERSION }}
+          disk-size: 2048M
           force-avd-creation: false
-          emulator-options: -no-snapshot-save -no-window -noaudio -no-boot-anim
-          script: ./gradlew android:connectedCheck -x makeJniLibrariesDesktop -x android:makeJniLibraries -x android:makeTestJniLibraries
+          emulator-options: -no-snapshot-save -no-window -noaudio -no-boot-anim -no-metrics
+          script: |
+            adb logcat -c
+            adb logcat > logcat.log &
+            LOGCAT_PID="$!"
+            echo "LOGCAT_PID=$LOGCAT_PID" >> "$GITHUB_ENV"
+            ./gradlew android:connectedCheck android:packaging-test:connectedCheck -x makeJniLibrariesDesktop -x android:makeJniLibraries
           working-directory: java
+
+      - name: Stop logcat
+        if: always()
+        run: kill ${{ env.LOGCAT_PID}} || true
+
+      - name: Upload logcat logs
+        if: always()
+        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+        with:
+            name: logcat-logs-api${{ matrix.api_level }}-${{ matrix.arch }}
+            path: java/logcat.log
+            retention-days: 2
+
+  aarch64:
+    name: AArch64 Linux Tests
+    runs-on: ubuntu-24.04-arm64-4-cores
+    if: ${{ github.event_name != 'schedule' || (github.repository_owner == 'signalapp' && endsWith(github.repository, '-private')) }}
+    timeout-minutes: 60
+
+    steps:
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
+    - name: Enable KT skip flag
+      if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.ignore_kt_tests == true) }}
+      run: echo "LIBSIGNAL_TESTING_IGNORE_KT_TESTS=true" >> "$GITHUB_ENV"
+
+    - run: sudo apt-get update && sudo apt-get install protobuf-compiler
+
+    - run: rustup toolchain install "$(cat rust-toolchain)" --profile minimal
+
+    # Skip building for Android; that's handled by the previous tests.
+    - run: ./gradlew build -PskipAndroid | tee ./gradle-output.txt
+      working-directory: java
+      shell: bash # Explicitly setting the shell turns on pipefail in GitHub Actions
+
+    # Check for -Xcheck:jni warnings manually; Gradle doesn't capture them for some reason.
+    - run: "! grep WARNING ./gradle-output.txt"
+      working-directory: java
 
   node-docker:
     name: Node (Ubuntu via Docker)
-    runs-on: ubuntu-latest
-    needs: [check-up-to-date]
-    if: ${{ always() && (needs.check-up-to-date.outputs.has-changes || github.event_name != 'schedule') }}
+    runs-on: ${{ inputs.bigger_workers == true && 'ubuntu-latest-4-cores' || 'ubuntu-latest' }}
+    if: ${{ github.event_name != 'schedule' || (github.repository_owner == 'signalapp' && endsWith(github.repository, '-private')) }}
+    timeout-minutes: 45
+
+    steps:
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
+    - name: Enable KT skip flag
+      if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.ignore_kt_tests == true) }}
+      run: echo "LIBSIGNAL_TESTING_IGNORE_KT_TESTS=true" >> "$GITHUB_ENV"
+    - run: node/docker-prebuildify.sh
+    - run: npm ci && npm run tsc && npm run test
+      working-directory: node
+      env:
+        PREBUILDS_ONLY: 1
+    - name: Upload prebuilds
+      uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+      with:
+        name: node-prebuilds
+        path: node/prebuilds
+        retention-days: 2
+
+  node-docker-secondary:
+    name: Node (Secondary Ubuntu via Docker)
+    runs-on: ${{ inputs.bigger_workers == true && 'ubuntu-latest-4-cores' || 'ubuntu-latest' }}
+    if: ${{ github.event_name != 'schedule' || (github.repository_owner == 'signalapp' && endsWith(github.repository, '-private')) }}
     timeout-minutes: 45
 
     steps:
@@ -188,23 +307,43 @@ jobs:
       with:
         submodules: recursive
     - run: node/docker-prebuildify.sh
-    - run: yarn tsc && yarn test
-      working-directory: node
-      env:
-        PREBUILDS_ONLY: 1
+    - name: Upload prebuilds
+      uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+      with:
+        name: node-prebuilds-secondary
+        path: node/prebuilds
+        retention-days: 2
+
+  node-reproducibility:
+    name: Verify Desktop Linux Reproducible Build
+    runs-on: ubuntu-latest
+    needs: [node-docker, node-docker-secondary]
+    if: ${{ needs.node-docker.result == 'success' && needs.node-docker-secondary.result == 'success' }}
+
+    steps:
+    - name: Download prebuilds
+      uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427 # v4.1.4
+      with:
+        name: node-prebuilds
+        path: a/prebuilds/
+    - name: Download prebuilds (secondary)
+      uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427 # v4.1.4
+      with:
+        name: node-prebuilds-secondary
+        path: b/prebuilds/
+    - run: diff -qr a/ b/
 
   node-windows-arm64:
     name: Node (Windows ARM64 cross-compile)
     runs-on: windows-latest
-    needs: [check-up-to-date]
-    if: ${{ always() && (needs.check-up-to-date.outputs.has-changes || github.event_name != 'schedule') }}
+    if: ${{ github.event_name != 'schedule' || (github.repository_owner == 'signalapp' && endsWith(github.repository, '-private')) }}
     timeout-minutes: 45
 
     steps:
     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       with:
         submodules: recursive
-    - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --target aarch64-pc-windows-msvc
+    - run: rustup toolchain install "$(cat rust-toolchain)" --profile minimal --target aarch64-pc-windows-msvc
     # install nasm compiler for boring
     - name: Install nasm
       run: choco install nasm
@@ -215,111 +354,197 @@ jobs:
     - name: Get Node version from .nvmrc
       id: get-nvm-version
       shell: bash
-      run: echo "node-version=$(cat .nvmrc)" >> $GITHUB_OUTPUT
+      run: echo "node-version=$(cat .nvmrc)" >> "$GITHUB_OUTPUT"
     - uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
       with:
         node-version-file: '.nvmrc'
-    - run: npx yarn install --ignore-scripts --frozen-lockfile
-      working-directory: node
     - name: Build for arm64
-      run: npx prebuildify --napi -t ${{ steps.get-nvm-version.outputs.node-version }} --arch arm64
+      run: npm run build -- --arch arm64 --copy-to-prebuilds
       working-directory: node
-      env:
-        npm_config_dist_url: https://unofficial-builds.nodejs.org/download/release
 
   swift-cocoapod:
     name: Swift CocoaPod (all architectures)
-    runs-on: macOS-latest
-    needs: [check-up-to-date]
-    if: ${{ always() && (needs.check-up-to-date.outputs.has-changes || github.event_name != 'schedule') }}
+    runs-on: ${{ inputs.ios_runner || 'macos-15-xlarge' }}
+    if: ${{ github.event_name != 'schedule' || (github.repository_owner == 'signalapp' && endsWith(github.repository, '-private')) }}
     timeout-minutes: 45
+
+    # Uncomment this to select a specific version of Xcode to build and test with. Check the runner
+    # image (in https://github.com/actions/runner-images/) to see which ones are available. You can
+    # also set this on specific steps if necessary.
+    # env:
+    #   DEVELOPER_DIR: /Applications/Xcode_16.2.app
 
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           submodules: recursive
+      - name: Enable KT skip flag
+        if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.ignore_kt_tests == true) }}
+        run: echo "LIBSIGNAL_TESTING_IGNORE_KT_TESTS=true" >> "$GITHUB_ENV"
 
-      - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --target x86_64-apple-ios,aarch64-apple-ios,aarch64-apple-ios-sim --component rust-src
+      - run: rustup toolchain install "$(cat rust-toolchain)" --profile minimal --target x86_64-apple-ios,aarch64-apple-ios,aarch64-apple-ios-sim --component rust-src
 
       - run: brew install protobuf
-
-      - name: Build for x86_64-apple-ios
-        run: swift/build_ffi.sh --release
-        env:
-          CARGO_BUILD_TARGET: x86_64-apple-ios
 
       - name: Build for aarch64-apple-ios
         run: swift/build_ffi.sh --release
         env:
           CARGO_BUILD_TARGET: aarch64-apple-ios
 
+      # Build the simulator architectures for `pod lib lint` below.
+      - name: Build for x86_64-apple-ios
+        run: swift/build_ffi.sh --release
+        env:
+          CARGO_BUILD_TARGET: x86_64-apple-ios
+
       - name: Build for aarch64-apple-ios-sim
         run: swift/build_ffi.sh --release
         env:
           CARGO_BUILD_TARGET: aarch64-apple-ios-sim
 
+      # We run this for the non-hermetic tests; it's otherwise the same as regular CI.
       - name: Run pod lint
         run: pod lib lint --verbose --platforms=ios
 
+      # Make sure we can build for device, just for completeness.
+      - name: Set up testing workspace
+        run: pod install
+        working-directory: swift/cocoapods-testing
+
+      - name: Manually build for device
+        run: xcodebuild -scheme LibSignalClient -sdk iphoneos build-for-testing
+        working-directory: swift/cocoapods-testing
+
+      - name: Build in Release for device as well
+        run: xcodebuild -scheme LibSignalClient -sdk iphoneos -configuration Release
+        working-directory: swift/cocoapods-testing
+
   rust-stable-testing:
     name: Rust tests (using latest stable)
-    runs-on: ubuntu-latest
-    needs: [check-up-to-date]
-    if: ${{ always() && (needs.check-up-to-date.outputs.has-changes || github.event_name != 'schedule') }}
+    runs-on: ubuntu-latest-4-cores
+    if: ${{ github.event_name != 'schedule' || (github.repository_owner == 'signalapp' && endsWith(github.repository, '-private')) }}
     timeout-minutes: 45
 
     steps:
     - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       with:
         submodules: recursive
+    - name: Enable KT skip flag
+      if: ${{ github.event_name != 'workflow_dispatch' || (github.event_name == 'workflow_dispatch' && inputs.ignore_kt_tests == true) }}
+      run: echo "LIBSIGNAL_TESTING_IGNORE_KT_TESTS=true" >> "$GITHUB_ENV"
 
     - run: sudo apt-get update && sudo apt-get install gcc-multilib g++-multilib protobuf-compiler
 
     - run: rustup +stable target add i686-unknown-linux-gnu
 
+    - run: cargo +stable install cargo-audit
+
+    - run: cargo +stable audit -D warnings
+
     - name: Run tests
-      run: cargo +stable test --workspace --all-features --verbose -- --include-ignored
-
-    - name: Test run benches
-      run: cargo +stable test --workspace --benches --all-features --verbose
-
-    - name: Build bins and examples
-      run: cargo +stable build --workspace  --bins --examples --all-features --verbose
-
-    - name: Run libsignal-net smoke tests
-      run: cargo +stable run --example chat_smoke_test -p libsignal-net -- --try-all-routes staging
+      run: cargo +stable test --workspace --all-features --verbose --no-fail-fast -- --include-ignored
       env:
         RUST_LOG: debug
 
-    - name: cargo clean (reclaim disk space)
-      # Clean the contents of the target directory to avoid running out of disk space during the
-      # following steps.
-      run: cargo +stable clean
+    - name: Run hermetic tests without network access
+      run: |
+        TEST_CMD='unset LIBSIGNAL_TESTING_RUN_NONHERMETIC_TESTS LIBSIGNAL_TESTING_CDSI_ENCLAVE_SECRET LIBSIGNAL_TESTING_SVRB_ENCLAVE_SECRET && \
+                  cargo +stable test --workspace --all-features --verbose --no-fail-fast -- --include-ignored'
+        ./bin/run_with_network_isolation.sh "${TEST_CMD}"
+      env:
+        RUST_LOG: debug
+
+    - name: Test run benches
+      # Run with a match-all regex to select all the benchmarks, which (confusingly) causes other tests to be skipped.
+      run: cargo +stable test --workspace --benches --all-features --no-fail-fast --verbose '.*'
+      env:
+        RUST_LOG: debug
+
+    - name: Build bins and examples
+      run: cargo +stable build --workspace  --bins --examples --all-features --verbose --keep-going
+
+    - name: Run libsignal-net smoke tests
+      run: cargo +stable run --example chat_smoke_test -p libsignal-net --features="test-util" -- --try-all-routes staging
+      env:
+        RUST_LOG: debug
 
     - name: Run tests (32-bit)
       # Exclude signal-neon-futures because those tests run Node
-      run: cargo +stable test --workspace --all-features --verbose --target i686-unknown-linux-gnu --exclude signal-neon-futures -- --include-ignored
-
-    - name: cargo clean again (reclaim disk space)
-      # Clean the contents of the target directory to avoid running out of disk space during the
-      # following steps.
-      run: cargo +stable clean
+      run: cargo +stable test --workspace --all-features --verbose --target i686-unknown-linux-gnu --exclude signal-neon-futures --no-fail-fast -- --include-ignored
+      env:
+        RUST_LOG: debug
 
     - name: Run libsignal-protocol cross-version tests
-      run: cargo +stable test
+      run: cargo +stable test --no-fail-fast
       working-directory: rust/protocol/cross-version-testing
+      env:
+        RUST_LOG: debug
 
     - name: Run libsignal-protocol cross-version tests (32-bit)
-      run: cargo +stable test --target i686-unknown-linux-gnu
+      run: cargo +stable test --target i686-unknown-linux-gnu --no-fail-fast
       working-directory: rust/protocol/cross-version-testing
+      env:
+        RUST_LOG: debug
 
     # We don't run Clippy because GitHub silently updates `stable` and that can introduce new lints,
     # and we don't have a guarantee that any particular pinned nightly can build older libsignals.
 
+  rust-fuzzing:
+    name: Rust fuzzing
+    runs-on: ubuntu-latest-4-cores
+    if: ${{ github.event_name != 'schedule' || (github.repository_owner == 'signalapp' && endsWith(github.repository, '-private')) }}
+    timeout-minutes: 45
+
+    env:
+      CARGO_FUZZ_VERSION: 0.12.0
+      FUZZ_TIME_SECONDS: 60
+      FUZZ_JOBS: 4 # because this is a "4-cores" runner
+
+    steps:
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
+
+    - run: sudo apt-get update && sudo apt-get install protobuf-compiler
+
+    - run: rustup toolchain install "$(cat rust-toolchain)" --profile minimal
+
+    - name: Cache cargo-fuzz
+      uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+      with:
+        path: local-tools
+        key: ${{ runner.os }}-fuzzing-local-tools-${{ env.CARGO_FUZZ_VERSION }}
+
+    - name: Install cargo-fuzz if needed
+      run: cargo +stable install --version ${{ env.CARGO_FUZZ_VERSION }} --locked cargo-fuzz --root local-tools
+
+    - run: echo "$PWD/local-tools/bin" >> "$GITHUB_PATH"
+
+    # Note that these invocations will use libsignal's pinned toolchain,
+    # but it's always possible cargo-fuzz will want an older/newer nightly.
+    - run: cargo fuzz build interaction && cargo fuzz run interaction -j${{ env.FUZZ_JOBS }} -- -max_total_time=${{ env.FUZZ_TIME_SECONDS }}
+      working-directory: rust/protocol
+
+    - run: cargo fuzz build sealed_sender_v2 && cargo fuzz run sealed_sender_v2 -j${{ env.FUZZ_JOBS }} -- -max_total_time=${{ env.FUZZ_TIME_SECONDS }}
+      working-directory: rust/protocol
+
+    - run: cargo fuzz build dcap && cargo fuzz run dcap -j${{ env.FUZZ_JOBS }} -- -max_total_time=${{ env.FUZZ_TIME_SECONDS }}
+      working-directory: rust/attest
+
+    - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+      if: failure()
+      with:
+        name: fuzzing-artifacts-${{ github.sha }}
+        path: rust/*/fuzz/artifacts
+
+    # This isn't fuzzing, but we have to do it with a nightly compiler, so we're going to tack it on to this job.
+    - name: Build everything with no lockfile and -Zdirect-minimal-versions
+      run: mkdir minimal-versions && bin/without_building_boring.sh cargo check --workspace --all-targets --all-features --verbose --keep-going -Zdirect-minimal-versions -Zunstable-options --lockfile-path minimal-versions/Cargo.lock
+
   report_failures:
     name: Report Failures
     runs-on: ubuntu-latest
-    needs: [java-docker, java-reproducibility, android-emulator-tests, node-docker, node-windows-arm64, swift-cocoapod, rust-stable-testing]
+    needs: [java-docker, java-reproducibility, android-emulator-tests, aarch64, node-docker, node-reproducibility, node-windows-arm64, swift-cocoapod, rust-stable-testing, rust-fuzzing]
     if: ${{ failure() && github.event_name == 'schedule' }}
 
     permissions:
@@ -335,5 +560,6 @@ jobs:
             owner: context.repo.owner,
             repo: context.repo.repo,
             commit_sha: context.sha,
-            body: 'Failed Slow Tests: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}>'
+            body: 'Failed Slow Tests: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}>\n\n' +
+              'Note that a [later run](${{ github.server_url }}/${{ github.repository }}/actions/workflows/slow_tests.yml) may have succeeded.'
           })

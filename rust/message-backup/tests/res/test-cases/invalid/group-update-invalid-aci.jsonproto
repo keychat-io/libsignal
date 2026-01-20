@@ -1,7 +1,8 @@
 [
   {
     "version": "1",
-    "backupTimeMs": "1705692409729"
+    "backupTimeMs": "1705692409729",
+    "mediaRootBackupKey": "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=",
   },
   {
     "recipient": {
@@ -13,7 +14,8 @@
     "recipient": {
       "id": "2",
       "group": {
-        "masterKey": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="
+        "masterKey": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+        "snapshot": {}
       }
     }
   },
@@ -27,6 +29,7 @@
     "chatItem": {
       "chatId": "1",
       "authorId": "1",
+      "dateSent": 12345,
       "directionless": {},
       "updateMessage": {
         "groupChange": {

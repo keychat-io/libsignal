@@ -4,6 +4,7 @@
 //
 
 import { assert } from 'chai';
+import { Buffer } from 'node:buffer';
 
 import {
   ServerSecretParams,
@@ -58,31 +59,20 @@ import {
   ReceiptCredentialRequestContext,
   ReceiptCredentialResponse,
   BackupLevel,
-} from '../zkgroup/';
-import { Aci, Pni } from '../Address';
-import { LibSignalErrorBase, Uuid } from '..';
+  BackupCredentialType,
+} from '../zkgroup/index.js';
+import { Aci, Pni } from '../Address.js';
+import { LibSignalErrorBase, Uuid } from '../index.js';
+import {
+  assertArrayEquals,
+  assertArrayNotEquals,
+  assertByteArray,
+} from './util.js';
 
 const SECONDS_PER_DAY = 86400;
 
 function hexToBuffer(hex: string) {
   return Buffer.from(hex, 'hex');
-}
-function assertByteArray(hex: string, actual: Buffer) {
-  const actualHex = actual.toString('hex');
-
-  assert.strictEqual(hex, actualHex);
-}
-function assertArrayEquals(expected: Buffer, actual: Buffer) {
-  const expectedHex = expected.toString('hex');
-  const actualHex = actual.toString('hex');
-
-  assert.strictEqual(expectedHex, actualHex);
-}
-function assertArrayNotEquals(expected: Buffer, actual: Buffer) {
-  const expectedHex = expected.toString('hex');
-  const actualHex = actual.toString('hex');
-
-  assert.notEqual(expectedHex, actualHex);
 }
 
 describe('ZKGroup', () => {
@@ -111,7 +101,7 @@ describe('ZKGroup', () => {
 
   it('deserializationErrorType', () => {
     function assertDeserializeInvalidThrows<T>(
-      constructor: new (serialized: Buffer) => T
+      constructor: new (serialized: Uint8Array) => T
     ) {
       assert.throws(
         () => {
@@ -181,90 +171,11 @@ describe('ZKGroup', () => {
     );
   });
 
-  it('testAuthWithPniIntegration', () => {
-    const aci = Aci.fromUuid(TEST_UUID);
-    const pni = Pni.fromUuid(TEST_UUID_1);
-    const redemptionTime = 123456 * SECONDS_PER_DAY;
-
-    // Generate keys (client's are per-group, server's are not)
-    // ---
-
-    // SERVER
-    const serverSecretParams =
-      ServerSecretParams.generateWithRandom(TEST_ARRAY_32);
-    const serverPublicParams = serverSecretParams.getPublicParams();
-    const serverZkAuth = new ServerZkAuthOperations(serverSecretParams);
-
-    // CLIENT
+  it('has a string representation for GroupIdentifier', () => {
     const masterKey = new GroupMasterKey(TEST_ARRAY_32_1);
     const groupSecretParams = GroupSecretParams.deriveFromMasterKey(masterKey);
-
-    assertArrayEquals(
-      groupSecretParams.getMasterKey().serialize(),
-      masterKey.serialize()
-    );
-
-    const groupPublicParams = groupSecretParams.getPublicParams();
-
-    // SERVER
-    // Issue credential
-    const authCredentialResponse =
-      serverZkAuth.issueAuthCredentialWithPniAsServiceIdWithRandom(
-        TEST_ARRAY_32_2,
-        aci,
-        pni,
-        redemptionTime
-      );
-
-    // CLIENT
-    // Receive credential
-    const clientZkAuthCipher = new ClientZkAuthOperations(serverPublicParams);
-    const clientZkGroupCipher = new ClientZkGroupCipher(groupSecretParams);
-    const authCredential =
-      clientZkAuthCipher.receiveAuthCredentialWithPniAsServiceId(
-        aci,
-        pni,
-        redemptionTime,
-        authCredentialResponse
-      );
-
-    // Create and decrypt user entry
-    const aciCiphertext = clientZkGroupCipher.encryptServiceId(aci);
-    const aciPlaintext = clientZkGroupCipher.decryptServiceId(aciCiphertext);
-    assert(aci.isEqual(aciPlaintext));
-    const pniCiphertext = clientZkGroupCipher.encryptServiceId(pni);
-    const pniPlaintext = clientZkGroupCipher.decryptServiceId(pniCiphertext);
-    assert(pni.isEqual(pniPlaintext));
-
-    // Create presentation
-    const presentation =
-      clientZkAuthCipher.createAuthCredentialWithPniPresentationWithRandom(
-        TEST_ARRAY_32_5,
-        groupSecretParams,
-        authCredential
-      );
-
-    // Verify presentation
-    assertArrayEquals(
-      aciCiphertext.serialize(),
-      presentation.getUuidCiphertext().serialize()
-    );
-    const presentationPniCiphertext = presentation.getPniCiphertext();
-    // Use a generic assertion instead of assert.isNotNull because TypeScript understands it.
-    assert(presentationPniCiphertext !== null);
-    assertArrayEquals(
-      pniCiphertext.serialize(),
-      presentationPniCiphertext.serialize()
-    );
-    assert.deepEqual(
-      presentation.getRedemptionTime(),
-      new Date(1000 * redemptionTime)
-    );
-    serverZkAuth.verifyAuthCredentialPresentation(
-      groupPublicParams,
-      presentation,
-      new Date(1000 * redemptionTime)
-    );
+    const groupId = groupSecretParams.getPublicParams().getGroupIdentifier();
+    assert.equal(`${groupId}`, 'hOJWcwVI+LoJBpsiPszBM/WZ+YJ+3HCE+JIeSnDNnkw=');
   });
 
   it('testAuthZkcIntegration', () => {
@@ -484,7 +395,7 @@ describe('ZKGroup', () => {
       signature.serialize()
     );
 
-    const alteredMessage = Buffer.from(message);
+    const alteredMessage = Uint8Array.from(message);
     alteredMessage[0] ^= 1;
 
     assertArrayNotEquals(message, alteredMessage);
@@ -492,7 +403,7 @@ describe('ZKGroup', () => {
     try {
       serverPublicParams.verifySignature(alteredMessage, signature);
       assert.fail('signature validation should have failed!');
-    } catch (error) {
+    } catch (_error) {
       // good
     }
   });
@@ -505,13 +416,13 @@ describe('ZKGroup', () => {
   });
 
   it('testInvalidSerialized', () => {
-    const ckp = Buffer.alloc(289);
+    const ckp = new Uint8Array(289);
     ckp.fill(-127);
     assert.throws(() => new GroupSecretParams(ckp));
   });
 
   it('testWrongSizeSerialized', () => {
-    const ckp = Buffer.alloc(5);
+    const ckp = new Uint8Array(5);
     ckp.fill(-127);
     assert.throws(() => new GroupSecretParams(ckp));
   });
@@ -520,7 +431,7 @@ describe('ZKGroup', () => {
     const groupSecretParams = GroupSecretParams.generate();
     const clientZkGroupCipher = new ClientZkGroupCipher(groupSecretParams);
 
-    const plaintext = Buffer.from([0, 1, 2, 3, 4]);
+    const plaintext = Uint8Array.of(0, 1, 2, 3, 4);
     const ciphertext = clientZkGroupCipher.encryptBlob(plaintext);
     const plaintext2 = clientZkGroupCipher.decryptBlob(ciphertext);
     assertArrayEquals(plaintext, plaintext2);
@@ -707,6 +618,7 @@ describe('ZKGroup', () => {
   });
 
   describe('BackupAuthCredential', () => {
+    // Chosen randomly
     const SERVER_SECRET_RANDOM = hexToBuffer(
       '6987b92bdea075d3f8b42b39d780a5be0bc264874a18e11cac694e4fe28f6cca'
     );
@@ -715,16 +627,19 @@ describe('ZKGroup', () => {
     );
     const TEST_USER_ID: Uuid = 'e74beed0-e70f-4cfd-abbb-7e3eb333bbac';
 
+    // These are expectations; if the contents of a credential or derivation of a backup ID changes,
+    // they will need to be updated.
     const SERIALIZED_BACKUP_ID = hexToBuffer(
-      'e3926f11ddd143e6dd0f20bfcb08349e'
+      'a28962c7f9ac910f66e4bcb33f2cef06'
     );
     const SERIALIZED_REQUEST_CREDENTIAL = Buffer.from(
-      'AISCxQa8OsFqphsQPxqtzJk5+jndpE3SJG6bfazQB3994Aersq2yNRgcARBoedBeoEfKIXdty6X7l6+TiPFAqDvojRSO8xaZOpKJOvWSDJIGn6EeMl2jOjx+IQg8d8M0AQ==',
+      'AISCxQa8OsFqphsQPxqtzJk5+jndpE3SJG6bfazQB399rN6N8Dv5DAwvY4N36Uj0qGf0cV5a/8rf5nkxLeVNnF3ojRSO8xaZOpKJOvWSDJIGn6EeMl2jOjx+IQg8d8M0AQ==',
       'base64'
     );
 
     it('testDeterministic', () => {
-      const backupLevel = BackupLevel.Messages;
+      const backupLevel = BackupLevel.Free;
+      const credentialType = BackupCredentialType.Messages;
       const context = BackupAuthCredentialRequestContext.create(
         BACKUP_KEY,
         TEST_USER_ID
@@ -740,6 +655,7 @@ describe('ZKGroup', () => {
       const response = request.issueCredential(
         startOfDay,
         backupLevel,
+        credentialType,
         serverSecretParams
       );
       const credential = context.receive(
@@ -748,11 +664,19 @@ describe('ZKGroup', () => {
         serverSecretParams.getPublicParams()
       );
       assert.equal(backupLevel, credential.getBackupLevel());
+      assert.equal(credentialType, credential.getType());
       assertArrayEquals(SERIALIZED_BACKUP_ID, credential.getBackupId());
+
+      const presentation = credential.present(
+        serverSecretParams.getPublicParams()
+      );
+      assert.equal(backupLevel, presentation.getBackupLevel());
+      assertArrayEquals(SERIALIZED_BACKUP_ID, presentation.getBackupId());
     });
 
     it('testIntegration', () => {
-      const backupLevel = BackupLevel.Messages;
+      const backupLevel = BackupLevel.Free;
+      const credentialType = BackupCredentialType.Messages;
 
       const serverSecretParams =
         GenericServerSecretParams.generateWithRandom(SERVER_SECRET_RANDOM);
@@ -771,6 +695,7 @@ describe('ZKGroup', () => {
       const response = request.issueCredentialWithRandom(
         startOfDay,
         backupLevel,
+        credentialType,
         serverSecretParams,
         TEST_ARRAY_32_1
       );
@@ -782,6 +707,7 @@ describe('ZKGroup', () => {
         serverPublicParams
       );
       assert.equal(backupLevel, credential.getBackupLevel());
+      assert.equal(credentialType, credential.getType());
       const presentation = credential.presentWithRandom(
         serverPublicParams,
         TEST_ARRAY_32_2
@@ -1063,5 +989,64 @@ describe('ZKGroup', () => {
         serverPublicParams
       );
     });
+  });
+
+  it('works with CallLinkSecretParams', () => {
+    // SERVER: generate secret params and derive public params
+    const serverSecretParams =
+      ServerSecretParams.generateWithRandom(TEST_ARRAY_32);
+    const serverPublicParams = serverSecretParams.getPublicParams();
+
+    const aliceAci = Aci.parseFromServiceIdString(
+      '9d0652a3-dcc3-4d11-975f-74d61598733f'
+    );
+    const bobAci = Aci.parseFromServiceIdString(
+      '6838237d-02f6-4098-b110-698253d15961'
+    );
+
+    const callLinkSecretParams =
+      CallLinkSecretParams.deriveFromRootKey(TEST_ARRAY_32_1);
+
+    // CLIENT: encrypt service IDs using the call link secret params
+    const groupCiphertexts = [aliceAci, bobAci].map((aci) =>
+      callLinkSecretParams.encryptUserId(aci)
+    );
+
+    const aliceCiphertext = groupCiphertexts[0];
+
+    // SERVER: create an endorsements response for those ciphertexts using a
+    //   derived key with a fixed expiration
+    const now = Math.floor(Date.now() / 1000);
+    const startOfDay = now - (now % SECONDS_PER_DAY);
+    const expiration = new Date(1000 * (startOfDay + 2 * SECONDS_PER_DAY));
+    const todaysKey = GroupSendDerivedKeyPair.forExpiration(
+      expiration,
+      serverSecretParams
+    );
+    const response = GroupSendEndorsementsResponse.issue(
+      groupCiphertexts,
+      todaysKey
+    );
+
+    // CLIENT: receive the endorsements (using alice as the local user)
+    const receivedEndorsements = response.receiveWithCiphertexts(
+      groupCiphertexts,
+      aliceCiphertext,
+      serverPublicParams
+    );
+
+    // Call toToken with the CallLinkSecretParams and convert it to a full token.
+    // Internally, this decrypts the ciphertext using the CallLinkSecretParams.
+    const token =
+      receivedEndorsements.combinedEndorsement.toToken(callLinkSecretParams);
+    const fullToken = token.toFullToken(expiration);
+
+    const verifyKey = GroupSendDerivedKeyPair.forExpiration(
+      fullToken.getExpiration(),
+      serverSecretParams
+    );
+
+    // Check that the token generated from the CallLinkSecretParams includes bob, the remote user.
+    fullToken.verify([bobAci], verifyKey);
   });
 });

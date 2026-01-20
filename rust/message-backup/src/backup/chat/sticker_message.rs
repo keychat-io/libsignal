@@ -2,45 +2,51 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use crate::backup::chat::{ChatItemError, Reaction};
+#[cfg(test)]
+use derive_where::derive_where;
+
+use crate::backup::TryIntoWith;
+use crate::backup::chat::{ChatItemError, ReactionSet};
 use crate::backup::frame::RecipientId;
-use crate::backup::method::Contains;
+use crate::backup::method::LookupPair;
+use crate::backup::recipient::MinimalRecipientData;
+use crate::backup::serialize::SerializeOrder;
 use crate::backup::sticker::MessageSticker;
-use crate::backup::{TryFromWith, TryIntoWith as _};
+use crate::backup::time::ReportUnusualTimestamp;
 use crate::proto::backup as proto;
 
 /// Validated version of [`proto::StickerMessage`].
-#[derive(Debug)]
-#[cfg_attr(test, derive(PartialEq))]
-pub struct StickerMessage {
-    pub reactions: Vec<Reaction>,
-    pub sticker: MessageSticker,
+#[derive(Debug, serde::Serialize)]
+#[cfg_attr(test, derive_where(PartialEq; Recipient: PartialEq + SerializeOrder))]
+pub struct StickerMessage<Recipient> {
+    #[serde(bound(serialize = "Recipient: serde::Serialize + SerializeOrder"))]
+    pub reactions: ReactionSet<Recipient>,
+    pub sticker: Box<MessageSticker>,
     _limit_construction_to_module: (),
 }
 
-impl<R: Contains<RecipientId>> TryFromWith<proto::StickerMessage, R> for StickerMessage {
+impl<R: Clone, C: LookupPair<RecipientId, MinimalRecipientData, R> + ReportUnusualTimestamp>
+    TryIntoWith<StickerMessage<R>, C> for proto::StickerMessage
+{
     type Error = ChatItemError;
 
-    fn try_from_with(item: proto::StickerMessage, context: &R) -> Result<Self, Self::Error> {
+    fn try_into_with(self, context: &C) -> Result<StickerMessage<R>, Self::Error> {
         let proto::StickerMessage {
             reactions,
             sticker,
             special_fields: _,
-        } = item;
+        } = self;
 
-        let reactions = reactions
-            .into_iter()
-            .map(|r| r.try_into_with(context))
-            .collect::<Result<_, _>>()?;
+        let reactions = reactions.try_into_with(context)?;
 
         let sticker = sticker
             .into_option()
             .ok_or(ChatItemError::StickerMessageMissingSticker)?
-            .try_into()?;
+            .try_into_with(context)?;
 
-        Ok(Self {
+        Ok(StickerMessage {
             reactions,
-            sticker,
+            sticker: Box::new(sticker),
             _limit_construction_to_module: (),
         })
     }
@@ -50,12 +56,10 @@ impl<R: Contains<RecipientId>> TryFromWith<proto::StickerMessage, R> for Sticker
 mod test {
     use test_case::test_case;
 
-    use crate::backup::chat::testutil::{
-        invalid_reaction, no_reactions, ProtoHasField, TestContext,
-    };
-    use crate::backup::chat::ReactionError;
-
     use super::*;
+    use crate::backup::chat::ReactionError;
+    use crate::backup::recipient::FullRecipientData;
+    use crate::backup::testutil::TestContext;
 
     impl proto::StickerMessage {
         pub(crate) fn test_data() -> Self {
@@ -67,27 +71,14 @@ mod test {
         }
     }
 
-    impl ProtoHasField<Vec<proto::Reaction>> for proto::StickerMessage {
-        fn get_field_mut(&mut self) -> &mut Vec<proto::Reaction> {
-            &mut self.reactions
-        }
-    }
-
-    #[test_case(no_reactions, Ok(()))]
-    #[test_case(
-        invalid_reaction,
-        Err(ChatItemError::Reaction(ReactionError::EmptyEmoji))
-    )]
-    fn sticker_message(
-        modifier: fn(&mut proto::StickerMessage),
-        expected: Result<(), ChatItemError>,
-    ) {
+    #[test_case(|x| x.reactions.clear() => Ok(()); "no reactions")]
+    #[test_case(|x| x.reactions.push(Default::default()) => Err(ChatItemError::Reaction(ReactionError::EmptyEmoji)); "invalid reaction")]
+    fn sticker_message(modifier: fn(&mut proto::StickerMessage)) -> Result<(), ChatItemError> {
         let mut message = proto::StickerMessage::test_data();
         modifier(&mut message);
 
-        let result = message
+        message
             .try_into_with(&TestContext::default())
-            .map(|_: StickerMessage| ());
-        assert_eq!(result, expected);
+            .map(|_: StickerMessage<FullRecipientData>| ())
     }
 }

@@ -38,7 +38,7 @@ pub struct AuthCredentialWithPniZkcResponse {
     proof: zkcredential::issuance::IssuanceProof,
 }
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct AuthCredentialWithPniZkcPresentation {
     version: VersionByte<PRESENTATION_VERSION_4>,
     proof: zkcredential::presentation::PresentationProof,
@@ -228,9 +228,8 @@ impl AuthCredentialWithPniZkcPresentation {
 mod test {
     use zkcredential::RANDOMNESS_LEN;
 
-    use crate::SECONDS_PER_DAY;
-
     use super::*;
+    use crate::SECONDS_PER_DAY;
 
     #[test]
     fn issue_receive_present() {

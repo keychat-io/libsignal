@@ -3,7 +3,7 @@ name = "libsignal-protocol-fuzz"
 version = "0.0.0"
 authors = ["Automatically generated"]
 publish = false
-edition = "2021"
+edition = "2024"
 
 [package.metadata]
 cargo-fuzz = true
@@ -11,11 +11,11 @@ cargo-fuzz = true
 [dependencies]
 libsignal-protocol = { path = ".." }
 
-env_logger = "0.10.0"
+env_logger = "0.11.4"
 futures-util = "0.3.7"
 libfuzzer-sys = "0.4"
 log = "0.4"
-rand = "0.8"
+rand = "0.9"
 
 
 # Prevent this from interfering with workspaces

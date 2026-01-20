@@ -6,21 +6,25 @@
 [package]
 name = "poksho"
 version = "0.7.0"
-authors = ["Signal Messenger LLC"]
-edition = "2021"
-license = "AGPL-3.0-only"
+authors.workspace = true
+license.workspace = true
+edition = "2024"
+rust-version = "1.85"
+
+[lints]
+workspace = true
 
 [dependencies]
-curve25519-dalek = "4.0"
-hmac = { version = "0.12", features = ["reset"] }
-sha2 = "0.10"
+curve25519-dalek = { workspace = true }
+hmac = { workspace = true, features = ["reset"] }
+sha2 = { workspace = true }
 
 [dev-dependencies]
-hex = "0.4"
+hex = { workspace = true }
 
 # For benchmarking
-criterion = "0.5"
-rand = "0.8"
+criterion = { workspace = true }
+rand = { workspace = true }
 
 [[bench]]
 name = "sho"

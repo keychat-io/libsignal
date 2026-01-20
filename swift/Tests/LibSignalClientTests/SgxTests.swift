@@ -6,6 +6,8 @@
 import LibSignalClient
 import XCTest
 
+#if !os(iOS) || targetEnvironment(simulator)
+
 class SgxTests: TestCaseBase {
     enum ServiceType {
         case svr2, cds2
@@ -14,40 +16,55 @@ class SgxTests: TestCaseBase {
     let testCases = [
         (
             ServiceType.cds2,
-            // echo 92a47851c79f22f85ee1e164cc0963e35c8debc6c8bc1dafca235c79f801a57e | xxd -r -p | base64
-            Data(base64Encoded: "OdePF/iqmo6c2vFllZR6BXusIfAU0av9apmy39ThjR0=")!,
+            [UInt8](fromHexString: "39d78f17f8aa9a8e9cdaf16595947a057bac21f014d1abfd6a99b2dfd4e18d1d")!,
             readResource(forName: "cds2handshakestart.data"),
             Date(timeIntervalSince1970: 1_655_857_680)
         ),
-
         (
             ServiceType.svr2,
-            // echo acb1973aa0bbbd14b3b4e06f145497d948fd4a98efc500fcce363b3b743ec482 | xxd -r -p | base64
-            Data(base64Encoded: "rLGXOqC7vRSztOBvFFSX2Uj9SpjvxQD8zjY7O3Q+xII=")!,
+            [UInt8](fromHexString: "97f151f6ed078edbbfd72fa9cae694dcc08353f1f5e8d9ccd79a971b10ffc535")!,
             readResource(forName: "svr2handshakestart.data"),
-            Date(timeIntervalSince1970: 1_709_245_753)
+            Date(timeIntervalSince1970: 1_768_516_141)
         ),
     ]
 
-    static func build(serviceType: ServiceType, mrenclave: Data, attestationMessage: Data, currentDate: Date) throws -> SgxClient {
+    static func build(
+        serviceType: ServiceType,
+        mrenclave: [UInt8],
+        attestationMessage: Data,
+        currentDate: Date
+    ) throws -> SgxClient {
         switch serviceType {
         case .cds2:
-            return try Cds2Client(mrenclave: mrenclave, attestationMessage: attestationMessage, currentDate: currentDate)
+            return try Cds2Client(
+                mrenclave: mrenclave,
+                attestationMessage: attestationMessage,
+                currentDate: currentDate
+            )
         case .svr2:
-            return try Svr2Client(mrenclave: mrenclave, attestationMessage: attestationMessage, currentDate: currentDate)
+            return try Svr2Client(
+                mrenclave: mrenclave,
+                attestationMessage: attestationMessage,
+                currentDate: currentDate
+            )
         }
     }
 
     func testCreateClient() {
         for (serviceType, mrenclave, attestationMessage, currentDate) in self.testCases {
-            let client = try! SgxTests.build(serviceType: serviceType, mrenclave: mrenclave, attestationMessage: attestationMessage, currentDate: currentDate)
+            let client = try! SgxTests.build(
+                serviceType: serviceType,
+                mrenclave: mrenclave,
+                attestationMessage: attestationMessage,
+                currentDate: currentDate
+            )
             let initialMessage = client.initialRequest()
-            XCTAssertEqual(48, initialMessage.count, String(describing: serviceType))
+            XCTAssertEqual(1632, initialMessage.count, String(describing: serviceType))
         }
     }
 
     func testCreateClientFailsWithInvalidMrenclave() {
-        let invalidMrenclave = Data(repeating: 0, count: 0)
+        let invalidMrenclave = [UInt8]()
         for (serviceType, _, attestationMessage, currentDate) in self.testCases {
             XCTAssertThrowsError(
                 try SgxTests.build(
@@ -55,7 +72,8 @@ class SgxTests: TestCaseBase {
                     mrenclave: invalidMrenclave,
                     attestationMessage: attestationMessage,
                     currentDate: currentDate
-                ), String(describing: serviceType)
+                ),
+                String(describing: serviceType)
             )
         }
     }
@@ -69,7 +87,8 @@ class SgxTests: TestCaseBase {
                     mrenclave: mrenclave,
                     attestationMessage: invalidMessage,
                     currentDate: currentDate
-                ), String(describing: serviceType)
+                ),
+                String(describing: serviceType)
             )
         }
     }
@@ -100,3 +119,5 @@ class SgxTests: TestCaseBase {
         }
     }
 }
+
+#endif

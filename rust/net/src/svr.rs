@@ -5,48 +5,54 @@
 
 use std::marker::PhantomData;
 
-use crate::auth::HttpBasicAuth;
-use crate::enclave::{EnclaveEndpointConnection, IntoAttestedConnection, NewHandshake, Svr3Flavor};
-use crate::infra::connection_manager::ConnectionManager;
-use crate::infra::ws::AttestedConnection;
-use crate::infra::{AsyncDuplexStream, TransportConnector};
+use libsignal_net_infra::route::{RouteProvider, UnresolvedWebsocketServiceRoute};
+use libsignal_net_infra::ws::attested::AttestedConnection;
 
+use crate::auth::Auth;
+use crate::connect_state::{ConnectionResources, RouteInfo, WebSocketTransportConnectorFactory};
 pub use crate::enclave::Error;
+use crate::enclave::{
+    ConnectionLabel, EnclaveKind, EndpointParams, IntoAttestedConnection, LabeledConnection,
+    NewHandshake,
+};
 
-pub struct SvrConnection<Flavor: Svr3Flavor, S> {
-    inner: AttestedConnection<S>,
-    witness: PhantomData<Flavor>,
+pub struct SvrConnection<Kind: EnclaveKind> {
+    inner: AttestedConnection,
+    remote_address: RouteInfo,
+    witness: PhantomData<Kind>,
 }
 
-impl<Flavor: Svr3Flavor, S> From<SvrConnection<Flavor, S>> for AttestedConnection<S> {
-    fn from(conn: SvrConnection<Flavor, S>) -> Self {
-        conn.inner
+impl<Kind: EnclaveKind> IntoAttestedConnection for SvrConnection<Kind> {
+    fn into_labeled_connection(self) -> LabeledConnection {
+        let label = ConnectionLabel::from_log_safe(self.remote_address.to_string());
+        let connection = self.inner;
+        (connection, label)
     }
 }
 
-impl<Flavor: Svr3Flavor, S: Send> IntoAttestedConnection for SvrConnection<Flavor, S> {
-    type Stream = S;
-}
-
-impl<E: Svr3Flavor, S: AsyncDuplexStream> SvrConnection<E, S>
+impl<E> SvrConnection<E>
 where
-    E: Svr3Flavor + NewHandshake + Sized,
-    S: AsyncDuplexStream,
+    E: EnclaveKind + NewHandshake + Sized,
 {
-    pub async fn connect<C, T>(
-        auth: impl HttpBasicAuth,
-        connection: &EnclaveEndpointConnection<E, C>,
-        transport_connector: T,
-    ) -> Result<Self, Error>
-    where
-        C: ConnectionManager,
-        T: TransportConnector<Stream = S>,
-    {
-        connection
-            .connect(auth, transport_connector)
+    pub async fn connect(
+        connection_resources: ConnectionResources<'_, impl WebSocketTransportConnectorFactory>,
+        route_provider: impl RouteProvider<Route = UnresolvedWebsocketServiceRoute>,
+        ws_config: crate::infra::ws::Config,
+        params: &EndpointParams<'_, E>,
+        auth: &Auth,
+    ) -> Result<Self, Error> {
+        connection_resources
+            .connect_attested_ws(
+                route_provider,
+                auth,
+                ws_config,
+                format!("svr:{}", std::any::type_name::<E>()).into(),
+                params,
+            )
             .await
-            .map(|inner| Self {
-                inner,
+            .map(|(connection, info)| Self {
+                inner: connection,
+                remote_address: info,
                 witness: PhantomData,
             })
     }

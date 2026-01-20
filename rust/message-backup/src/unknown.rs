@@ -5,8 +5,6 @@
 
 //! Protobuf unknown field searching.
 
-use std::ops::ControlFlow;
-
 #[cfg(test)]
 mod visit_dyn;
 
@@ -21,7 +19,7 @@ impl std::fmt::Display for FormatPath<&[PathPart]> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut it = self.0.iter().peekable();
         while let Some(part) = it.next() {
-            write!(f, "{}", part)?;
+            write!(f, "{part}")?;
             if it.peek().is_some() {
                 write!(f, ".")?
             }
@@ -145,28 +143,25 @@ impl PathPart {
 }
 
 /// Visitor for unknown fields on a [`protobuf::Message`].
-pub(crate) trait VisitUnknownFields {
+pub trait VisitUnknownFields {
     /// Calls the visitor for each unknown field in the message.
     fn visit_unknown_fields<F: UnknownFieldVisitor>(&self, visitor: F);
 }
 
 /// Convenience "alias" for a callable visitor.
-pub trait UnknownFieldVisitor: FnMut(Vec<PathPart>, UnknownValue) -> ControlFlow<()> {}
-impl<F: FnMut(Vec<PathPart>, UnknownValue) -> ControlFlow<()>> UnknownFieldVisitor for F {}
+pub trait UnknownFieldVisitor: FnMut(Vec<PathPart>, UnknownValue) {}
+impl<F: FnMut(Vec<PathPart>, UnknownValue)> UnknownFieldVisitor for F {}
 
 impl<M: visit_static::VisitUnknownFields> VisitUnknownFields for M {
     fn visit_unknown_fields<F: UnknownFieldVisitor>(&self, mut visitor: F) {
-        let _: ControlFlow<()> =
-            visit_static::VisitUnknownFields::visit_unknown_fields(self, Path::Root, &mut visitor);
+        visit_static::VisitUnknownFields::visit_unknown_fields(self, Path::Root, &mut visitor);
     }
 }
 
 /// Extension trait for [`VisitUnknownFields`] with convenience methods.
-pub(crate) trait VisitUnknownFieldsExt {
-    #[allow(dead_code)]
+pub trait VisitUnknownFieldsExt {
     fn has_unknown_fields(&self) -> bool;
     fn collect_unknown_fields(&self) -> Vec<(Vec<PathPart>, UnknownValue)>;
-    #[allow(dead_code)]
     fn find_unknown_field(&self) -> Option<(Vec<PathPart>, UnknownValue)>;
 }
 
@@ -179,7 +174,6 @@ impl<V: VisitUnknownFields> VisitUnknownFieldsExt for V {
         let mut found = Vec::new();
         self.visit_unknown_fields(|path, value| {
             found.push((path, value));
-            ControlFlow::Continue(())
         });
         found
     }
@@ -187,8 +181,9 @@ impl<V: VisitUnknownFields> VisitUnknownFieldsExt for V {
     fn find_unknown_field(&self) -> Option<(Vec<PathPart>, UnknownValue)> {
         let mut found = None;
         self.visit_unknown_fields(|path, value| {
-            found = Some((path, value));
-            ControlFlow::Break(())
+            if found.is_none() {
+                found = Some((path, value));
+            }
         });
 
         found
@@ -203,7 +198,6 @@ mod test {
     use test_case::{test_case, test_matrix};
 
     use super::*;
-
     use crate::proto::test as proto;
 
     trait ProtoWireCast {
@@ -242,7 +236,7 @@ mod test {
         }
     }
 
-    fn never_visits(_: Vec<PathPart>, _: UnknownValue) -> ControlFlow<()> {
+    fn never_visits(_: Vec<PathPart>, _: UnknownValue) {
         unreachable!("unexpectedly visited")
     }
 
@@ -251,21 +245,19 @@ mod test {
 
     impl VisitUnknownFields for ViaProtoDescriptors<proto::TestMessage> {
         fn visit_unknown_fields<F: UnknownFieldVisitor>(&self, mut visitor: F) {
-            let _: ControlFlow<()> =
-                visit_dyn::visit_unknown_fields(&self.0, Path::Root, &mut visitor);
+            visit_dyn::visit_unknown_fields(&self.0, Path::Root, &mut visitor);
         }
     }
 
     impl VisitUnknownFields for ViaProtoDescriptors<proto::TestMessageWithExtraFields> {
         fn visit_unknown_fields<F: UnknownFieldVisitor>(&self, mut visitor: F) {
-            let _: ControlFlow<()> =
-                visit_dyn::visit_unknown_fields(&self.0, Path::Root, &mut visitor);
+            visit_dyn::visit_unknown_fields(&self.0, Path::Root, &mut visitor);
         }
     }
 
     impl<M: visit_static::VisitUnknownFields> VisitUnknownFields for ViaStaticDispatch<M> {
         fn visit_unknown_fields<F: UnknownFieldVisitor>(&self, mut visitor: F) {
-            let _: ControlFlow<()> = visit_static::VisitUnknownFields::visit_unknown_fields(
+            visit_static::VisitUnknownFields::visit_unknown_fields(
                 &self.0,
                 Path::Root,
                 &mut visitor,

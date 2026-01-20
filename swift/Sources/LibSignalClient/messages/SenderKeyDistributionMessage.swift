@@ -6,9 +6,11 @@
 import Foundation
 import SignalFfi
 
-public class SenderKeyDistributionMessage: NativeHandleOwner {
-    override internal class func destroyNativeHandle(_ handle: OpaquePointer) -> SignalFfiErrorRef? {
-        return signal_sender_key_distribution_message_destroy(handle)
+public class SenderKeyDistributionMessage: NativeHandleOwner<SignalMutPointerSenderKeyDistributionMessage> {
+    override internal class func destroyNativeHandle(
+        _ handle: NonNull<SignalMutPointerSenderKeyDistributionMessage>
+    ) -> SignalFfiErrorRef? {
+        return signal_sender_key_distribution_message_destroy(handle.pointer)
     }
 
     public convenience init(
@@ -17,35 +19,35 @@ public class SenderKeyDistributionMessage: NativeHandleOwner {
         store: SenderKeyStore,
         context: StoreContext
     ) throws {
-        var result: OpaquePointer?
-        try sender.withNativeHandle { senderHandle in
-            try withUnsafePointer(to: distributionId.uuid) { distributionId in
-                try withSenderKeyStore(store, context) {
-                    try checkError(signal_sender_key_distribution_message_create(
-                        &result,
-                        senderHandle,
-                        distributionId,
-                        $0
-                    ))
+        let result = try sender.withNativeHandle { senderHandle in
+            try withSenderKeyStore(store, context) { store in
+                try invokeFnReturningValueByPointer(.init()) {
+                    signal_sender_key_distribution_message_create(
+                        $0,
+                        senderHandle.const(),
+                        SignalUuid(bytes: distributionId.uuid),
+                        store
+                    )
                 }
             }
         }
-        self.init(owned: result!)
+        self.init(owned: NonNull(result)!)
     }
 
-    public convenience init(bytes: [UInt8]) throws {
-        var result: OpaquePointer?
-        try bytes.withUnsafeBorrowedBuffer {
-            try checkError(signal_sender_key_distribution_message_deserialize(&result, $0))
+    public convenience init(bytes: Data) throws {
+        let result = try bytes.withUnsafeBorrowedBuffer { bytes in
+            try invokeFnReturningValueByPointer(.init()) {
+                signal_sender_key_distribution_message_deserialize($0, bytes)
+            }
         }
-        self.init(owned: result!)
+        self.init(owned: NonNull(result)!)
     }
 
     public var signatureKey: PublicKey {
         return withNativeHandle { nativeHandle in
             failOnError {
                 try invokeFnReturningNativeHandle {
-                    signal_sender_key_distribution_message_get_signature_key($0, nativeHandle)
+                    signal_sender_key_distribution_message_get_signature_key($0, nativeHandle.const())
                 }
             }
         }
@@ -55,7 +57,7 @@ public class SenderKeyDistributionMessage: NativeHandleOwner {
         return withNativeHandle { nativeHandle in
             failOnError {
                 try invokeFnReturningUuid {
-                    signal_sender_key_distribution_message_get_distribution_id($0, nativeHandle)
+                    signal_sender_key_distribution_message_get_distribution_id($0, nativeHandle.const())
                 }
             }
         }
@@ -65,7 +67,7 @@ public class SenderKeyDistributionMessage: NativeHandleOwner {
         return withNativeHandle { nativeHandle in
             failOnError {
                 try invokeFnReturningInteger {
-                    signal_sender_key_distribution_message_get_chain_id($0, nativeHandle)
+                    signal_sender_key_distribution_message_get_chain_id($0, nativeHandle.const())
                 }
             }
         }
@@ -75,29 +77,51 @@ public class SenderKeyDistributionMessage: NativeHandleOwner {
         return withNativeHandle { nativeHandle in
             failOnError {
                 try invokeFnReturningInteger {
-                    signal_sender_key_distribution_message_get_iteration($0, nativeHandle)
+                    signal_sender_key_distribution_message_get_iteration($0, nativeHandle.const())
                 }
             }
         }
     }
 
-    public func serialize() -> [UInt8] {
+    public func serialize() -> Data {
         return withNativeHandle { nativeHandle in
             failOnError {
-                try invokeFnReturningArray {
-                    signal_sender_key_distribution_message_serialize($0, nativeHandle)
+                try invokeFnReturningData {
+                    signal_sender_key_distribution_message_serialize($0, nativeHandle.const())
                 }
             }
         }
     }
 
-    public var chainKey: [UInt8] {
+    public var chainKey: Data {
         return withNativeHandle { nativeHandle in
             failOnError {
-                try invokeFnReturningArray {
-                    signal_sender_key_distribution_message_get_chain_key($0, nativeHandle)
+                try invokeFnReturningData {
+                    signal_sender_key_distribution_message_get_chain_key($0, nativeHandle.const())
                 }
             }
         }
+    }
+}
+
+extension SignalMutPointerSenderKeyDistributionMessage: SignalMutPointer {
+    public typealias ConstPointer = SignalConstPointerSenderKeyDistributionMessage
+
+    public init(untyped: OpaquePointer?) {
+        self.init(raw: untyped)
+    }
+
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+
+    public func const() -> Self.ConstPointer {
+        Self.ConstPointer(raw: self.raw)
+    }
+}
+
+extension SignalConstPointerSenderKeyDistributionMessage: SignalConstPointer {
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
     }
 }

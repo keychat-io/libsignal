@@ -12,12 +12,12 @@
  * @module WebpSanitizer
  */
 
-import * as Native from '../Native';
-import {
+import * as Native from './Native.js';
+import type {
   IoError,
   InvalidMediaInputError,
   UnsupportedMediaInputError,
-} from './Errors';
+} from './Errors.js';
 
 /**
  * Sanitize a WebP input.
@@ -27,6 +27,6 @@ import {
  * @throws {InvalidMediaInputError} If the input could not be parsed because it was invalid.
  * @throws {UnsupportedMediaInputError} If the input could not be parsed because it's unsupported in some way.
  */
-export function sanitize(input: Buffer): void {
+export function sanitize(input: Uint8Array): void {
   Native.WebpSanitizer_Sanitize(input);
 }

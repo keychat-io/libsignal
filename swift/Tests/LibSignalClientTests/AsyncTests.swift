@@ -10,18 +10,121 @@
 import SignalFfi
 import XCTest
 
-extension SignalCPromiseTestingHandleType: PromiseStruct {
-    public typealias Result = OpaquePointer
+extension SignalCPromiseMutPointerTestingHandleType: LibSignalClient.PromiseStruct {
+    public typealias Result = SignalMutPointerTestingHandleType
 }
 
-extension SignalCPromiseOtherTestingHandleType: PromiseStruct {
-    public typealias Result = OpaquePointer
+extension SignalCPromiseMutPointerOtherTestingHandleType: LibSignalClient.PromiseStruct {
+    public typealias Result = SignalMutPointerOtherTestingHandleType
+}
+
+extension SignalFfi.SignalMutPointerTestingHandleType: LibSignalClient.SignalMutPointer {
+    public typealias ConstPointer = SignalConstPointerTestingHandleType
+
+    public init(untyped: OpaquePointer?) {
+        self.init(raw: untyped)
+    }
+
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+
+    public func const() -> Self.ConstPointer {
+        Self.ConstPointer(raw: self.raw)
+    }
+}
+
+extension SignalFfi.SignalConstPointerTestingHandleType: LibSignalClient.SignalConstPointer {
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+}
+
+extension SignalFfi.SignalMutPointerOtherTestingHandleType: LibSignalClient.SignalMutPointer {
+    public typealias ConstPointer = SignalConstPointerOtherTestingHandleType
+
+    public init(untyped: OpaquePointer?) {
+        self.init(raw: untyped)
+    }
+
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+
+    public func const() -> Self.ConstPointer {
+        Self.ConstPointer(raw: self.raw)
+    }
+}
+
+extension SignalFfi.SignalConstPointerOtherTestingHandleType: LibSignalClient.SignalConstPointer {
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+}
+
+extension SignalFfi.SignalMutPointerTestingFutureCancellationCounter: LibSignalClient.SignalMutPointer {
+    public typealias ConstPointer = SignalConstPointerTestingFutureCancellationCounter
+
+    public init(untyped: OpaquePointer?) {
+        self.init(raw: untyped)
+    }
+
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+
+    public func const() -> Self.ConstPointer {
+        Self.ConstPointer(raw: self.raw)
+    }
+}
+
+extension SignalFfi.SignalConstPointerTestingFutureCancellationCounter: LibSignalClient.SignalConstPointer {
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+}
+
+private final class CancelCounter: NativeHandleOwner<SignalMutPointerTestingFutureCancellationCounter>,
+    @unchecked
+    Sendable
+{
+    public convenience init(initialValue: UInt8 = 0) {
+        let out = failOnError {
+            try invokeFnReturningValueByPointer(.init()) {
+                signal_testing_future_cancellation_counter_create($0, initialValue)
+            }
+        }
+        self.init(owned: NonNull(out)!)
+    }
+
+    public func waitForCount(asyncContext: TokioAsyncContext, target: UInt8) async throws {
+        let _: Bool = try await asyncContext.invokeAsyncFunction { promise, asyncContext in
+            self.withNativeHandle {
+                signal_testing_future_cancellation_counter_wait_for_count(
+                    promise,
+                    asyncContext.const(),
+                    $0.const(),
+                    target
+                )
+            }
+        }
+    }
+
+    override static func destroyNativeHandle(
+        _ nativeHandle: NonNull<SignalMutPointerTestingFutureCancellationCounter>
+    ) -> SignalFfiErrorRef? {
+        signal_testing_future_cancellation_counter_destroy(nativeHandle.pointer)
+    }
 }
 
 final class AsyncTests: TestCaseBase {
     func testSuccess() async throws {
         let result: Int32 = try await invokeAsyncFunction {
-            signal_testing_future_success($0, OpaquePointer(bitPattern: -1), 21)
+            signal_testing_future_success(
+                $0,
+                SignalConstPointerNonSuspendingBackgroundThreadRuntime(raw: OpaquePointer(bitPattern: -1)),
+                21
+            )
         }
         XCTAssertEqual(42, result)
     }
@@ -29,7 +132,11 @@ final class AsyncTests: TestCaseBase {
     func testFailure() async throws {
         do {
             let _: Int32 = try await invokeAsyncFunction {
-                signal_testing_future_failure($0, OpaquePointer(bitPattern: -1), 21)
+                signal_testing_future_failure(
+                    $0,
+                    SignalConstPointerNonSuspendingBackgroundThreadRuntime(raw: OpaquePointer(bitPattern: -1)),
+                    21
+                )
             }
             XCTFail("should have failed")
         } catch SignalError.invalidArgument(_) {
@@ -40,28 +147,38 @@ final class AsyncTests: TestCaseBase {
     func testInvokeAsyncHandleTypes() async throws {
         do {
             let value = UInt8(44)
-            let handle: OpaquePointer = try await invokeAsyncFunction {
-                signal_testing_future_produces_pointer_type($0, OpaquePointer(bitPattern: -1), value)
+            let handle = try await invokeAsyncFunction {
+                signal_testing_future_produces_pointer_type(
+                    $0,
+                    SignalConstPointerNonSuspendingBackgroundThreadRuntime(raw: OpaquePointer(bitPattern: -1)),
+                    value
+                )
             }
             defer { signal_testing_handle_type_destroy(handle) }
             XCTAssertEqual(
                 try invokeFnReturningInteger { result in
-                    signal_testing_testing_handle_type_get_value(result, handle)
-                }, value
+                    signal_testing_testing_handle_type_get_value(result, handle.const())
+                },
+                value
             )
         }
 
         do {
             let value = "into the future"
-            let otherHandle: OpaquePointer = try await invokeAsyncFunction {
-                signal_testing_future_produces_other_pointer_type($0, OpaquePointer(bitPattern: -1), value)
+            let otherHandle = try await invokeAsyncFunction {
+                signal_testing_future_produces_other_pointer_type(
+                    $0,
+                    SignalConstPointerNonSuspendingBackgroundThreadRuntime(raw: OpaquePointer(bitPattern: -1)),
+                    value
+                )
             }
             defer { signal_other_testing_handle_type_destroy(otherHandle) }
 
             XCTAssertEqual(
                 try invokeFnReturningString { result in
-                    signal_testing_other_testing_handle_type_get_value(result, otherHandle)
-                }, value
+                    signal_testing_other_testing_handle_type_get_value(result, otherHandle.const())
+                },
+                value
             )
         }
     }
@@ -73,8 +190,9 @@ final class AsyncTests: TestCaseBase {
         var _continuation: AsyncStream<Int>.Continuation!
         let completionStream = AsyncStream<Int> { _continuation = $0 }
         let continuation = _continuation!
+        let counter = CancelCounter()
 
-        let makeTask = { (id: Int) in
+        let makeTask = { (id: Int, counter: CancelCounter) in
             Task {
                 defer {
                     // Do this unconditionally so that the outer test procedure doesn't get stuck.
@@ -82,7 +200,9 @@ final class AsyncTests: TestCaseBase {
                 }
                 do {
                     _ = try await asyncContext.invokeAsyncFunction { promise, asyncContext in
-                        signal_testing_only_completes_by_cancellation(promise, asyncContext)
+                        counter.withNativeHandle { counter in
+                            signal_testing_future_increment_on_cancel(promise, asyncContext.const(), counter.const())
+                        }
                     }
                 } catch is CancellationError {
                     // Okay, expected.
@@ -91,8 +211,8 @@ final class AsyncTests: TestCaseBase {
                 }
             }
         }
-        let task1 = makeTask(1)
-        let task2 = makeTask(2)
+        let task1 = makeTask(1, counter)
+        let task2 = makeTask(2, counter)
 
         var completionIter = completionStream.makeAsyncIterator()
 
@@ -106,6 +226,8 @@ final class AsyncTests: TestCaseBase {
         task1.cancel()
         let secondCompletionId = await completionIter.next()
         XCTAssertEqual(secondCompletionId, 1)
+
+        try await counter.waitForCount(asyncContext: asyncContext, target: 2)
     }
 }
 

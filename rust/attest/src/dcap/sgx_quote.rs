@@ -7,19 +7,19 @@
 //!
 //! See <https://download.01.org/intel-sgx/sgx-dcap/1.7/linux/docs/Intel_SGX_ECDSA_QuoteLibReference_DCAP_API.pdf> section A.4
 
-use boring::bn::BigNum;
-use boring::ec::{EcGroup, EcKey};
-use boring::ecdsa::{EcdsaSig, EcdsaSigRef};
-use boring::error::ErrorStack;
-use boring::nid::Nid;
-use boring::pkey::Public;
-use sha2::Digest;
-
-use std::intrinsics::transmute;
 use std::time::SystemTime;
 
+use boring_signal::bn::BigNum;
+use boring_signal::ec::{EcGroup, EcKey};
+use boring_signal::ecdsa::{EcdsaSig, EcdsaSigRef};
+use boring_signal::error::ErrorStack;
+use boring_signal::nid::Nid;
+use boring_signal::pkey::Public;
+use sha2::Digest;
+use zerocopy::{FromBytes, Immutable, IntoBytes};
+
 use crate::cert_chain::CertChain;
-use crate::dcap::ecdsa::{ecdsa_signature_from_bytes, EcdsaSigned};
+use crate::dcap::ecdsa::{EcdsaSigned, ecdsa_signature_from_bytes};
 use crate::dcap::sgx_report_body::SgxReportBody;
 use crate::dcap::sgx_x509::SgxPckExtension;
 use crate::dcap::{Error, Expireable};
@@ -47,17 +47,16 @@ impl<'a> SgxQuote<'a> {
         }
 
         // check the version before we try to deserialize (don't advance bytes)
-        let version = u16::from_le_bytes(bytes[0..2].try_into().expect("correct size"));
+        let version = u16::from_le_bytes(*bytes.first_chunk().expect("checked size"));
         if version != QUOTE_V3 {
             return Err(Error::new("unsupported quote version"));
         }
         let quote_body = util::read_array::<{ std::mem::size_of::<SgxQuoteBody>() }>(bytes);
         let quote_body = SgxQuoteBody::try_from(quote_body)?;
 
-        if bytes.len() < std::mem::size_of::<u32>() {
-            return Err(Error::new("underflow reading signature length"));
-        }
-        let signature_len = util::read_u32_le(bytes);
+        let signature_len = util::read_from_bytes::<UInt32LE>(bytes)
+            .ok_or_else(|| Error::new("underflow reading signature length"))?
+            .get();
         if bytes.len() < signature_len as usize {
             return Err(Error::new("underflow reading signature"));
         }
@@ -70,26 +69,11 @@ impl<'a> SgxQuote<'a> {
     }
 }
 
-/// Reads the bytes backing `value`.
-///
-/// SAFETY: `T` must be a `repr(C)` or `repr(transparent)` struct with no interior padding
-/// (alignment of 1), and all its fields recursively the same down to bytes (`u8` or `i8`) or
-/// fixed-sized arrays of bytes.
-///
-/// Rust can only check the alignment of the top-level type; it can't check the repr or the
-/// properties of fields. Be careful!
-unsafe fn bytes_of<T>(value: &T) -> &[u8] {
-    assert_eq!(1, std::mem::align_of::<T>());
-    let len = std::mem::size_of::<T>();
-    let ptr = value as *const T;
-    std::slice::from_raw_parts(ptr as *const u8, len)
-}
-
 /// Verifies the signature of the quote header + ISV report, which must be signed
 /// by the quoting enclave attest key
-impl<'a> EcdsaSigned for SgxQuote<'a> {
+impl EcdsaSigned for SgxQuote<'_> {
     fn data(&self) -> &[u8] {
-        unsafe { bytes_of(&self.quote_body) }
+        self.quote_body.as_bytes()
     }
 
     fn signature(&self) -> &EcdsaSigRef {
@@ -102,7 +86,7 @@ const QUOTE_V3: u16 = 3;
 
 // https://github.com/openenclave/openenclave/tree/v0.17.7
 // sgx_quote.h
-#[derive(Debug)]
+#[derive(Debug, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 pub(crate) struct SgxQuoteBody {
     //    /* (0) */
@@ -154,18 +138,18 @@ impl TryFrom<[u8; std::mem::size_of::<SgxQuoteBody>()]> for SgxQuoteBody {
     type Error = super::Error;
 
     fn try_from(bytes: [u8; std::mem::size_of::<SgxQuoteBody>()]) -> super::Result<Self> {
-        let quote_body: SgxQuoteBody = unsafe { transmute(bytes) };
-        if quote_body.version.value() != QUOTE_V3 {
+        let quote_body = Self::read_from_bytes(&bytes).expect("size was already checked");
+        if quote_body.version.get() != QUOTE_V3 {
             return Err(Error::new(format!(
                 "unsupported SGX quote version: {}",
-                quote_body.version.value(),
+                quote_body.version.get(),
             )));
         }
         // the type of the attestation signing key - we only speak ECDSA-256-with-P-256 curve
-        if quote_body.sign_type.value() != SgxAttestationAlgorithm::EcdsaP256 as u16 {
+        if quote_body.sign_type.get() != SgxAttestationAlgorithm::EcdsaP256 as u16 {
             return Err(Error::new(format!(
                 "unsupported SGX attestation algorithm: {}",
-                quote_body.sign_type.value(),
+                quote_body.sign_type.get(),
             )));
         }
 
@@ -173,7 +157,7 @@ impl TryFrom<[u8; std::mem::size_of::<SgxQuoteBody>()]> for SgxQuoteBody {
     }
 }
 
-impl<'a> Expireable for SgxQuote<'a> {
+impl Expireable for SgxQuote<'_> {
     fn valid_at(&self, timestamp: SystemTime) -> bool {
         // quote_body is not expireable
         self.support.valid_at(timestamp)
@@ -213,9 +197,9 @@ pub(crate) struct SgxQuoteSupport<'a> {
 
 /// Validates the signature of the QE report, which must be
 /// signed by the pck_cert leaf public key
-impl<'a> EcdsaSigned for SgxQuoteSupport<'a> {
+impl EcdsaSigned for SgxQuoteSupport<'_> {
     fn data(&self) -> &[u8] {
-        unsafe { bytes_of(&self.qe_report_body) }
+        self.qe_report_body.as_bytes()
     }
 
     fn signature(&self) -> &EcdsaSigRef {
@@ -225,27 +209,21 @@ impl<'a> EcdsaSigned for SgxQuoteSupport<'a> {
 
 impl<'a> SgxQuoteSupport<'a> {
     pub fn read(src: &mut &'a [u8]) -> super::Result<Self> {
-        if src.len() < std::mem::size_of::<SgxEcdsaSignatureHeader>() {
-            return Err(Error::new("incorrect buffer size"));
-        }
+        let header: SgxEcdsaSignatureHeader =
+            util::read_from_bytes(src).ok_or_else(|| Error::new("incorrect buffer size"))?;
 
-        let header_bytes =
-            util::read_array::<{ std::mem::size_of::<SgxEcdsaSignatureHeader>() }>(src);
-        let header = SgxEcdsaSignatureHeader::try_from(header_bytes).context("signature header")?;
-
-        if src.len() < header.auth_data_size.value() as usize {
+        if src.len() < header.auth_data_size.get() as usize {
             return Err(Error::new("buffer underflow"));
         }
-        let auth_data = util::read_bytes(src, header.auth_data_size.value() as usize);
-        if src.len() < std::mem::size_of::<u16>() + std::mem::size_of::<u32>() {
-            return Err(Error::new("buffer underflow"));
-        }
-        let cert_key_type = util::read_u16_le(src);
-        if cert_key_type != CertificationKeyType::PckCertChain as u16 {
+        let auth_data = util::read_bytes(src, header.auth_data_size.get() as usize);
+        let (cert_key_type, cert_data_size) = util::read_from_bytes::<UInt16LE>(src)
+            .zip(util::read_from_bytes::<UInt32LE>(src))
+            .ok_or_else(|| Error::new("buffer underflow"))?;
+
+        if cert_key_type.get() != CertificationKeyType::PckCertChain as u16 {
             return Err(Error::new("unsupported certification key type"));
         }
-
-        let cert_data_size = util::read_u32_le(src) as usize;
+        let cert_data_size = cert_data_size.get() as usize;
 
         if src.len() < cert_data_size {
             return Err(Error::new("remaining data does not match expected size"));
@@ -325,13 +303,13 @@ impl<'a> SgxQuoteSupport<'a> {
     }
 }
 
-impl<'a> Expireable for SgxQuoteSupport<'a> {
+impl Expireable for SgxQuoteSupport<'_> {
     fn valid_at(&self, timestamp: SystemTime) -> bool {
         self.pck_cert_chain.valid_at(timestamp)
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, zerocopy::FromBytes)]
 #[repr(C)]
 struct SgxEcdsaSignatureHeader {
     signature: [u8; 64],
@@ -344,25 +322,14 @@ struct SgxEcdsaSignatureHeader {
 static_assertions::const_assert_eq!(1, std::mem::align_of::<SgxEcdsaSignatureHeader>());
 static_assertions::const_assert_eq!(578, std::mem::size_of::<SgxEcdsaSignatureHeader>());
 
-impl TryFrom<[u8; std::mem::size_of::<SgxEcdsaSignatureHeader>()]> for SgxEcdsaSignatureHeader {
-    type Error = super::Error;
-
-    fn try_from(
-        bytes: [u8; std::mem::size_of::<SgxEcdsaSignatureHeader>()],
-    ) -> super::Result<Self> {
-        Ok(unsafe { transmute(bytes) })
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    use boring::pkey::Private;
-
     use std::fs;
     use std::path::Path;
 
+    use boring_signal::pkey::Private;
+
+    use super::*;
     use crate::cert_chain::testutil::cert_chain;
 
     #[test]
@@ -527,11 +494,8 @@ mod tests {
     fn deserialize_unsupported_key_type() {
         let mut support = quote_support_bytes();
         let auth_data_size = {
-            let mut header_bytes = [0u8; std::mem::size_of::<SgxEcdsaSignatureHeader>()];
-            header_bytes
-                .copy_from_slice(&support[..std::mem::size_of::<SgxEcdsaSignatureHeader>()]);
-            let header = SgxEcdsaSignatureHeader::try_from(header_bytes).unwrap();
-            header.auth_data_size.value() as usize
+            let (header, _rest) = SgxEcdsaSignatureHeader::read_from_prefix(&support).unwrap();
+            header.auth_data_size.get() as usize
         };
 
         // corrupt key type
@@ -552,7 +516,7 @@ mod tests {
                 .expect("failed to read file");
         // bytes are {SgxQuoteBody, SupportLength (4), Support}
         let mut slice = &bytes[std::mem::size_of::<SgxQuoteBody>()..];
-        let signature_len = util::read_u32_le(&mut slice);
-        slice[..signature_len as usize].to_vec()
+        let signature_len = util::read_from_bytes::<UInt32LE>(&mut slice).unwrap();
+        slice[..signature_len.get() as usize].to_vec()
     }
 }

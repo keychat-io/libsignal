@@ -2,6 +2,7 @@ plugins {
     id 'java-library'
     id 'maven-publish'
     id 'signing'
+    id 'org.jetbrains.kotlin.jvm'
 }
 
 sourceCompatibility = 17
@@ -18,12 +19,21 @@ sourceSets {
             // Include libsignal sources shared between the client and server
             srcDir '../shared/java'
         }
+        kotlin {
+            srcDir 'src/main/java'
+            // Include libsignal sources shared between the client and server
+            srcDir '../shared/java'
+        }
         resources {
             srcDir '../shared/resources'
         }
     }
     test {
         java {
+            srcDir '../shared/test/java'
+        }
+        kotlin {
+            srcDir 'src/test/java'
             srcDir '../shared/test/java'
         }
     }
@@ -47,12 +57,29 @@ test {
 
 java {
     withSourcesJar()
-    withJavadocJar()
+}
+
+sourcesJar {
+    // Cut down on artifact size by leaving these out of the sources jar.
+    exclude '*.dll'
+    exclude '*.dylib'
+    exclude '*.so'
+}
+
+task dokkaHtmlJar(type: Jar) {
+    dependsOn(dokkaHtml)
+    from(dokkaHtml)
+    archiveClassifier.set("dokka")
+}
+
+task dokkaJavadocJar(type: Jar) {
+    dependsOn(dokkaJavadoc)
+    from(dokkaJavadoc)
+    archiveClassifier.set("javadoc")
 }
 
 processResources {
-    // TODO: Build a different variant of the JNI library for server.
-    dependsOn ':makeJniLibrariesDesktop'
+    dependsOn ':makeJniLibrariesServer'
 }
 
 // MARK: Publishing
@@ -62,6 +89,8 @@ publishing {
         mavenJava(MavenPublication) {
             artifactId = archivesBaseName
             from components.java
+            artifact dokkaHtmlJar
+            artifact dokkaJavadocJar
 
             pom {
                 name = archivesBaseName

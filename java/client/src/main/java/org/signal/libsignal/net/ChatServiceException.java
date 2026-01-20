@@ -5,9 +5,15 @@
 
 package org.signal.libsignal.net;
 
+import java.io.IOException;
+
 /** Error thrown by Chat Service API. */
-public class ChatServiceException extends Exception {
+public class ChatServiceException extends IOException {
   public ChatServiceException(String message) {
     super(message);
+  }
+
+  public ChatServiceException(String message, Throwable cause) {
+    super(message, cause);
   }
 }

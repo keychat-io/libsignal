@@ -6,7 +6,14 @@
 import Foundation
 import SignalFfi
 
-public enum BackupLevel: UInt8 {
+public enum BackupLevel: UInt8, Sendable {
     // This must match the Rust version of the enum.
-    case messages = 200, media = 201
+    case free = 200
+    case paid = 201
+}
+
+public enum BackupCredentialType: UInt8 {
+    // This must match the Rust version of the enum.
+    case messages = 1
+    case media = 2
 }

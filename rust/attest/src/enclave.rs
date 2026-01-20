@@ -6,12 +6,11 @@
 use std::collections::HashMap;
 
 use displaydoc::Display;
+use prost::Message;
 
 use crate::client_connection::ClientConnection;
 use crate::svr2::RaftConfig;
-use crate::tpm2snp::Tpm2Error;
-use crate::{client_connection, dcap, nitro, proto, snow_resolver};
-use prost::Message;
+use crate::{client_connection, dcap, proto, snow_resolver};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -53,32 +52,10 @@ impl From<prost::DecodeError> for Error {
     }
 }
 
-impl From<nitro::NitroError> for AttestationError {
-    fn from(err: nitro::NitroError) -> Self {
-        AttestationError {
-            message: err.to_string(),
-        }
-    }
-}
-
-impl From<nitro::NitroError> for Error {
-    fn from(err: nitro::NitroError) -> Self {
-        Self::AttestationError(err.into())
-    }
-}
-
-impl From<Tpm2Error> for AttestationError {
-    fn from(err: Tpm2Error) -> Self {
-        AttestationError {
-            message: err.to_string(),
-        }
-    }
-}
-
-impl From<Tpm2Error> for Error {
-    fn from(err: Tpm2Error) -> Self {
-        Self::AttestationError(err.into())
-    }
+#[derive(Clone, Copy)]
+pub enum HandshakeType {
+    PreQuantum,
+    PostQuantum,
 }
 
 /// A noise handshaker that can be used to build a [client_connection::ClientConnection]
@@ -115,17 +92,26 @@ impl Handshake {
     /// Completes client connection initiation, returns a valid client connection.
     pub fn complete(mut self, initial_received: &[u8]) -> Result<ClientConnection> {
         self.handshake.read_message(initial_received, &mut [])?;
+        let handshake_hash = self.handshake.get_handshake_hash().to_vec();
         let transport = self.handshake.into_transport_mode()?;
         log::info!("Successfully completed attested connection");
-        Ok(ClientConnection { transport })
+        Ok(ClientConnection {
+            handshake_hash,
+            transport,
+        })
     }
 
-    pub(crate) fn with_claims(claims: Claims) -> Result<UnvalidatedHandshake> {
+    pub(crate) fn with_claims(claims: Claims, typ: HandshakeType) -> Result<UnvalidatedHandshake> {
+        let pattern = match typ {
+            HandshakeType::PreQuantum => client_connection::NOISE_PATTERN,
+            HandshakeType::PostQuantum => client_connection::NOISE_PATTERN_HFS,
+        };
         let mut handshake = snow::Builder::with_resolver(
-            client_connection::NOISE_PATTERN.parse().expect("valid"),
+            pattern.parse().expect("valid"),
             Box::new(snow_resolver::Resolver),
         )
         .remote_public_key(&claims.public_key)
+        .expect("not called previously")
         .build_initiator()
         .map_err(|_| {
             // The only thing that can go wrong is that claims.public_key is invalid, which isn't a
@@ -170,8 +156,7 @@ impl UnvalidatedHandshake {
         if expected_raft_config != *actual_config {
             return Err(Error::AttestationDataError {
                 reason: format!(
-                    "Unexpected raft config {:?} (expected {:?})",
-                    actual_config, expected_raft_config
+                    "Unexpected raft config {actual_config:?} (expected {expected_raft_config:?})"
                 ),
             });
         }
@@ -186,7 +171,7 @@ impl UnvalidatedHandshake {
 pub struct Claims {
     pub(crate) public_key: Vec<u8>,
     pub(crate) raft_group_config: Option<proto::svr::RaftGroupConfig>,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "this field is never read")]
     pub(crate) custom: HashMap<String, Vec<u8>>,
 }
 

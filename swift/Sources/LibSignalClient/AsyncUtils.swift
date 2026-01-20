@@ -36,8 +36,8 @@ extension SignalCPromiseRawPointer: PromiseStruct {
     typealias Result = UnsafeRawPointer
 }
 
-extension SignalCPromiseCdsiLookup: PromiseStruct {
-    typealias Result = OpaquePointer
+extension SignalCPromiseMutPointerCdsiLookup: PromiseStruct {
+    typealias Result = SignalMutPointerCdsiLookup
 }
 
 extension SignalCPromiseFfiCdsiLookupResponse: PromiseStruct {
@@ -48,25 +48,63 @@ extension SignalCPromiseFfiChatResponse: PromiseStruct {
     typealias Result = SignalFfiChatResponse
 }
 
-extension SignalCPromiseFfiChatServiceDebugInfo: PromiseStruct {
-    typealias Result = SignalFfiChatServiceDebugInfo
+extension SignalCPromiseMutPointerAuthenticatedChatConnection: PromiseStruct {
+    typealias Result = SignalMutPointerAuthenticatedChatConnection
 }
 
-extension SignalCPromiseFfiResponseAndDebugInfo: PromiseStruct {
-    typealias Result = SignalFfiResponseAndDebugInfo
+extension SignalCPromiseMutPointerUnauthenticatedChatConnection: PromiseStruct {
+    typealias Result = SignalMutPointerUnauthenticatedChatConnection
+}
+
+extension SignalCPromiseMutPointerProvisioningChatConnection: PromiseStruct {
+    typealias Result = SignalMutPointerProvisioningChatConnection
+}
+
+extension SignalCPromiseMutPointerRegistrationService: PromiseStruct {
+    typealias Result = SignalMutPointerRegistrationService
+}
+
+extension SignalCPromiseFfiCheckSvr2CredentialsResponse: PromiseStruct {
+    typealias Result = SignalFfiCheckSvr2CredentialsResponse
+}
+
+extension SignalCPromiseMutPointerRegisterAccountResponse: PromiseStruct {
+    typealias Result = SignalMutPointerRegisterAccountResponse
+}
+
+extension SignalCPromiseOptionalUuid: PromiseStruct {
+    typealias Result = SignalOptionalUuid
+}
+
+extension SignalCPromiseMutPointerBackupStoreResponse: PromiseStruct {
+    typealias Result = SignalMutPointerBackupStoreResponse
+}
+
+extension SignalCPromiseMutPointerBackupRestoreResponse: PromiseStruct {
+    typealias Result = SignalMutPointerBackupRestoreResponse
 }
 
 extension SignalCPromiseOwnedBufferOfc_uchar: PromiseStruct {
     typealias Result = SignalOwnedBuffer
 }
 
+extension SignalCPromiseOwnedBufferOfServiceIdFixedWidthBinaryBytes: PromiseStruct {
+    typealias Result = SignalOwnedBufferOfServiceIdFixedWidthBinaryBytes
+}
+
+extension SignalCPromiseOptionalPairOfc_charu832: PromiseStruct {
+    typealias Result = SignalOptionalPairOfc_charu832
+}
+
 /// A type-erased version of ``Completer``.
 ///
 /// Not for direct use, see Completer instead.
 private class CompleterBase {
-    let completeUnsafe: (_ error: SignalFfiErrorRef?, _ valuePtr: UnsafeRawPointer?) -> Void
+    typealias RawCompletion = @Sendable (_ error: SignalFfiErrorRef?, _ valuePtr: sending UnsafeRawPointer?) -> Void
 
-    init(completeUnsafe: @escaping (SignalFfiErrorRef?, UnsafeRawPointer?) -> Void) {
+    let completeUnsafe: RawCompletion
+
+    init(completeUnsafe: @escaping RawCompletion) {
         self.completeUnsafe = completeUnsafe
     }
 }
@@ -85,15 +123,18 @@ private class CompleterBase {
 private class Completer<Promise: PromiseStruct>: CompleterBase {
     init(continuation: CheckedContinuation<Promise.Result, Error>) {
         super.init { error, valuePtr in
-            continuation.resume(with: Result {
+            do {
                 try checkError(error)
                 guard let valuePtr else {
                     throw SignalError.internalError("produced neither an error nor a value")
                 }
                 // This is the part that preserves the type:
                 // we assume that whatever pointer we've been handed does in fact point to a Promise.Result.
-                return valuePtr.load(as: Promise.Result.self)
-            })
+                let value = valuePtr.load(as: Promise.Result.self)
+                continuation.resume(returning: value)
+            } catch {
+                continuation.resume(throwing: error)
+            }
         }
     }
 
@@ -103,7 +144,10 @@ private class Completer<Promise: PromiseStruct>: CompleterBase {
     /// You must ensure that either the callback is called, or the result is passed to
     /// ``cleanUpUncompletedPromiseStruct(_:)``.
     func makePromiseStruct() -> Promise {
-        typealias RawPromiseCallback = @convention(c) (_ error: SignalFfiErrorRef?, _ value: UnsafeRawPointer?, _ context: UnsafeRawPointer?) -> Void
+        typealias RawPromiseCallback =
+            @convention(c) (
+                _ error: SignalFfiErrorRef?, _ value: sending UnsafeRawPointer?, _ context: UnsafeRawPointer?
+            ) -> Void
         let completeOpaque: RawPromiseCallback = { error, value, context in
             let completer: CompleterBase = Unmanaged.fromOpaque(context!).takeRetainedValue()
             completer.completeUnsafe(error, value)
@@ -113,9 +157,19 @@ private class Completer<Promise: PromiseStruct>: CompleterBase {
         // so we can treat `completeOpaque` as a promise callback for any type.
         // We know it's the *correct* type (for this completer specifically!)
         // because of how `self.completeUnsafe` is initialized.
+        // And while we are casting away `sending`,
+        // we know that Rust is already enforcing that the `bridge_fn` result is allowed to hop threads (Send),
+        // and that it won't use or escape the C representation of that result besides passing it to the callback.
         // So first we build a promise struct---it doesn't matter which one---by reinterpreting the callback...
-        typealias RawPointerPromiseCallback = @convention(c) (_ error: SignalFfiErrorRef?, _ value: UnsafePointer<UnsafeRawPointer?>?, _ context: UnsafeRawPointer?) -> Void
-        let rawPromiseStruct = SignalCPromiseRawPointer(complete: unsafeBitCast(completeOpaque, to: RawPointerPromiseCallback.self), context: Unmanaged.passRetained(self).toOpaque(), cancellation_id: 0)
+        typealias RawPointerPromiseCallback =
+            @convention(c) (
+                _ error: SignalFfiErrorRef?, _ value: UnsafePointer<UnsafeRawPointer?>?, _ context: UnsafeRawPointer?
+            ) -> Void
+        let rawPromiseStruct = SignalCPromiseRawPointer(
+            complete: unsafeBitCast(completeOpaque, to: RawPointerPromiseCallback.self),
+            context: Unmanaged.passRetained(self).toOpaque(),
+            cancellation_id: 0
+        )
 
         // ...And then we reinterpret the entire struct, because all promise structs *also* have the same layout.
         // (Which we at least check a little bit here.)

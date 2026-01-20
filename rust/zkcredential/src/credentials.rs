@@ -5,20 +5,23 @@
 
 //! Types used in both the issuance and presentation of credentials
 
+use std::sync::LazyLock;
+
 use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
-use lazy_static::lazy_static;
 use partial_default::PartialDefault;
 use poksho::{ShoApi, ShoHmacSha256, ShoSha256};
 use serde::{Deserialize, Serialize};
 
-use crate::sho::ShoExt;
 use crate::RANDOMNESS_LEN;
+use crate::sho::ShoExt;
 
 /// A credential created by the issuing server over a set of attributes.
 ///
 /// Defined in Chase-Perrin-Zaverucha section 3.1.
 #[derive(Clone, Serialize, Deserialize, PartialDefault)]
+// This type intentionally does not implement `Copy` to make it harder to
+// accidentally duplicate these values.
 pub struct Credential {
     pub(crate) t: Scalar,
     pub(crate) U: RistrettoPoint,
@@ -71,8 +74,7 @@ impl CredentialPrivateKey {
     pub(crate) fn credential_core(&self, M: &[RistrettoPoint], sho: &mut dyn ShoApi) -> Credential {
         assert!(
             M.len() <= NUM_SUPPORTED_ATTRS,
-            "more than {} attributes not supported",
-            NUM_SUPPORTED_ATTRS
+            "more than {NUM_SUPPORTED_ATTRS} attributes not supported"
         );
         let t = sho.get_scalar();
         let U = sho.get_point();
@@ -177,9 +179,7 @@ impl Serialize for CredentialKeyPair {
     }
 }
 
-lazy_static! {
-    static ref SYSTEM_PARAMS: SystemParams = SystemParams::generate();
-}
+static SYSTEM_PARAMS: LazyLock<SystemParams> = LazyLock::new(SystemParams::generate);
 
 pub(crate) const NUM_SUPPORTED_ATTRS: usize = 7; // 1 aggregate public, 3 two-point private
 
@@ -233,19 +233,21 @@ impl SystemParams {
 
 #[cfg(test)]
 mod tests {
-    use hex_literal::hex;
+    use const_str::hex;
 
     use super::*;
 
     impl SystemParams {
-        const SYSTEM_HARDCODED: &'static [u8] = &hex!("589c8718e8263a53a78932b6212a46e7fd52de3ad157b5bb277dba494cfd3471d4cc5f90685952917b33366efcce0512a1f8d70f974758266cb04fc424346d37b20f49cb2a081c94b1771fd8c172ae21785c61ea2c7e31947ce351e7b5ff07028c5329beb87b317ffcd981e440819d91136c988d6d9fbea4a87e55ed24a5993aa02f688ab1d3bd19056f94c8a44b8faddfa3c9c79c95ad44311a7bf00e5e862ec2c399f0d689dfb8c2dc0d7caba32afcf58cf0d85f78195a0b5ab732f565595492cfd982321d1f9be4b21fe6a0214306023d6a05d0d23f67ddc1c0400e5e0a5e92d17595131b7a095e740b884b8c9bb0226a39cfd027c769c4f4677c51f21b24da81fb2bd1356a9d0650f6a63fcc90d93bd74a954ba6f75f0e9fca47a6d21734bce7b28f06b76ef2c44d20a07026534e586eb8e1038874a93e44de362ce7bc0844bffc88e390c62519e281aa6fd53ff9ddd1d9ba303cf70004278ea2ae66ce05a2749d29eba56f3efe99e42902825c473dfc3c154c3762d2e76bd103f629d250b2d9d5c243a4cf8f3be21a84f153f44e2733a105cf780a20f03d84fe1ebbeb0e");
+        const SYSTEM_HARDCODED: &'static [u8] = &hex!(
+            "589c8718e8263a53a78932b6212a46e7fd52de3ad157b5bb277dba494cfd3471d4cc5f90685952917b33366efcce0512a1f8d70f974758266cb04fc424346d37b20f49cb2a081c94b1771fd8c172ae21785c61ea2c7e31947ce351e7b5ff07028c5329beb87b317ffcd981e440819d91136c988d6d9fbea4a87e55ed24a5993aa02f688ab1d3bd19056f94c8a44b8faddfa3c9c79c95ad44311a7bf00e5e862ec2c399f0d689dfb8c2dc0d7caba32afcf58cf0d85f78195a0b5ab732f565595492cfd982321d1f9be4b21fe6a0214306023d6a05d0d23f67ddc1c0400e5e0a5e92d17595131b7a095e740b884b8c9bb0226a39cfd027c769c4f4677c51f21b24da81fb2bd1356a9d0650f6a63fcc90d93bd74a954ba6f75f0e9fca47a6d21734bce7b28f06b76ef2c44d20a07026534e586eb8e1038874a93e44de362ce7bc0844bffc88e390c62519e281aa6fd53ff9ddd1d9ba303cf70004278ea2ae66ce05a2749d29eba56f3efe99e42902825c473dfc3c154c3762d2e76bd103f629d250b2d9d5c243a4cf8f3be21a84f153f44e2733a105cf780a20f03d84fe1ebbeb0e"
+        );
     }
 
     #[test]
     fn test_system() {
         let params = SystemParams::generate();
         let serialized = bincode::serialize(&params).expect("can serialize");
-        println!("PARAMS = {:#x?}", serialized);
+        println!("PARAMS = {serialized:#x?}");
         assert!(serialized == SystemParams::SYSTEM_HARDCODED);
     }
 

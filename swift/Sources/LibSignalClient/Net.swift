@@ -12,7 +12,7 @@ public class Net {
     ///
     /// The services running in each environment are distinct, and operations
     /// for one do not affect the other.
-    public enum Environment: UInt8 {
+    public enum Environment: UInt8, Sendable {
         // This needs to be kept in sync with the Rust version of the enum.
 
         /// Signal's staging environment.
@@ -22,32 +22,205 @@ public class Net {
         case production = 1
     }
 
-    /// An SVR3 client providing backup and restore functionality.
-    public let svr3: Svr3Client
+    /// Build variant for remote config key selection.
+    ///
+    /// This enum must be kept in sync with the Rust version.
+    ///
+    /// - ``production``: Use for release builds. Only uses base remote config keys without suffixes.
+    /// - ``beta``: Use for all other builds (nightly, alpha, internal, public betas). Prefers
+    ///   keys with a `.beta` suffix, falling back to base keys if the suffixed key is not present.
+    public enum BuildVariant: UInt8, Sendable {
+        /// Production build variant: uses only base remote config keys.
+        case production = 0
+
+        /// Beta build variant: prefers `.beta` suffixed keys, falls back to base keys.
+        case beta = 1
+    }
+
+    /// The "scheme" for Signal TLS proxies. See ``Net/setProxy(scheme:host:port:username:password:)``.
+    public static let signalTlsProxyScheme = "org.signal.tls"
 
     /// Creates a new `Net` instance that enables interacting with services in the given Signal environment.
-    public init(env: Environment, userAgent: String) {
+    ///
+    /// - Warning: This initializer is deprecated. Use ``init(env:userAgent:buildVariant:remoteConfig:)`` instead.
+    @available(*, deprecated, message: "Use init(env:userAgent:buildVariant:remoteConfig:) instead")
+    public convenience init(
+        env: Environment,
+        userAgent: String,
+        remoteConfig: [String: String] = [:]
+    ) {
+        self.init(
+            env: env,
+            userAgent: userAgent,
+            buildVariant: .production,
+            remoteConfig: remoteConfig
+        )
+    }
+
+    /// Creates a new `Net` instance that enables interacting with services in the given Signal environment.
+    public init(
+        env: Environment,
+        userAgent: String,
+        buildVariant: BuildVariant,
+        remoteConfig: [String: String] = [:]
+    ) {
+        self.environment = env
         self.asyncContext = TokioAsyncContext()
-        self.connectionManager = ConnectionManager(env: env, userAgent: userAgent)
-        self.svr3 = Svr3Client(self.asyncContext, self.connectionManager)
+        self.connectionManager = ConnectionManager(
+            env: env,
+            userAgent: userAgent,
+            remoteConfig: remoteConfig,
+            buildVariant: buildVariant
+        )
     }
 
     /// Sets the proxy host to be used for all new connections (until overridden).
     ///
-    /// Sets a domain name and port to be used to proxy all new outgoing connections. The proxy can
-    /// be overridden by calling this method again or unset by calling ``Net/clearProxy()``.
+    /// Sets a server to be used to proxy all new outgoing connections. The proxy can be
+    /// overridden by calling this method again or unset by calling ``Net/clearProxy()``.
+    /// Passing `nil` for the `port` means the default port for the scheme will be used.
+    ///
+    /// To specify a Signal transparent TLS proxy, use ``Net/signalTlsProxyScheme``,
+    /// or the overload that takes a separate domain and port number.
+    ///
+    /// Existing connections and services will continue with the setting they were created with.
+    /// (In particular, changing this setting will not affect any existing ``ChatConnection``s.)
+    ///
+    /// - Throws: if the scheme is unsupported or if the provided parameters are invalid for that scheme
+    ///   (e.g. Signal TLS proxies don't support authentication)
+    public func setProxy(
+        scheme: String,
+        host: String,
+        port: UInt16? = nil,
+        username: String? = nil,
+        password: String? = nil
+    ) throws {
+        try self.connectionManager.setProxy(
+            scheme: scheme,
+            host: host,
+            port: port,
+            username: username,
+            password: password
+        )
+    }
+
+    /// Sets the Signal TLS proxy host to be used for all new connections (until overridden).
+    ///
+    /// Sets a domain name and port to be used to proxy all new outgoing connections, using a Signal
+    /// transparent TLS proxy. The proxy can be overridden by calling this method again or unset by
+    /// calling ``Net/clearProxy()``.
+    ///
+    /// Existing connections and services will continue with the setting they were created with.
+    /// (In particular, changing this setting will not affect any existing ``ChatConnection``s.)
     ///
     /// - Throws: if the host or port is not structurally valid, such as a port of 0.
-    public func setProxy(host: String, port: UInt16) throws {
-        try self.connectionManager.setProxy(host: host, port: port)
+    public func setProxy(host: String, port: UInt16?) throws {
+        // Support <username>@<host> syntax to allow UNENCRYPTED_FOR_TESTING as a marker user.
+        // This is not a stable feature of the API and may go away in the future;
+        // the Rust layer will reject any other users anyway. But it's convenient for us.
+        let (username, host): (String?, String) =
+            if let atSign = host.firstIndex(of: "@") {
+                (String(host[..<atSign]), String(host[atSign...].dropFirst()))
+            } else {
+                (nil, host)
+            }
+
+        try self.connectionManager.setProxy(
+            scheme: Net.signalTlsProxyScheme,
+            host: host,
+            port: port,
+            username: username,
+            password: nil
+        )
+    }
+
+    /// Refuses to make any new connections until a new proxy configuration is set or
+    /// ``Net/clearProxy()`` is called.
+    ///
+    /// Existing connections will not be affected.
+    public func setInvalidProxy() {
+        self.connectionManager.setInvalidProxy()
     }
 
     /// Clears the proxy host (if any) so that future connections will be made directly.
     ///
-    /// Clears any proxy configuration set via ``Net/setProxy(host:port:)``. If
-    /// none was set, calling this method is a no-op.
+    /// Clears any proxy configuration set via ``Net/setProxy(host:port:)`` or
+    /// ``Net/setInvalidProxy()``. If none was set, calling this method is a no-op.
+    ///
+    /// Existing connections and services will continue with the setting they were created with.
+    /// (In particular, changing this setting will not affect any existing ``ChatConnection``s.)
     public func clearProxy() {
         self.connectionManager.clearProxy()
+    }
+
+    /// Enables or disables censorship circumvention for all new connections (until changed).
+    ///
+    /// If CC is enabled, *new* connections and services may try additional routes to the Signal servers.
+    /// Existing connections and services will continue with the setting they were created with.
+    /// (In particular, changing this setting will not affect any existing ``ChatConnection``s.)
+    ///
+    /// CC is off by default.
+    public func setCensorshipCircumventionEnabled(_ enabled: Bool) {
+        self.connectionManager.setCensorshipCircumventionEnabled(enabled)
+    }
+
+    /// Updates the remote configuration settings used by libsignal with the specified build variant.
+    ///
+    /// The provided dictionary should be preprocessed as follows:
+    /// - Include only keys representing enabled configurations (entries explicitly disabled by the server should be omitted).
+    /// - Remove any platform-specific prefixes from keys (e.g., `"ios.libsignal."`).
+    /// - Replace values originally set to `nil` by the server with an empty string (`""`).
+    /// - Values should otherwise maintain the same format as they are returned by the server.
+    ///
+    /// Only new connections made *after* this call will use the new remote config settings.
+    /// Existing connections are not affected.
+    ///
+    /// - Parameters:
+    ///   - remoteConfig: A dictionary containing preprocessed libsignal configuration keys and their associated values
+    ///   - buildVariant: The build variant (Production or Beta) that determines which remote config keys to use
+    public func setRemoteConfig(_ remoteConfig: [String: String], buildVariant: BuildVariant) {
+        self.connectionManager.setRemoteConfig(remoteConfig, buildVariant: buildVariant)
+    }
+
+    /// Updates the remote configuration settings used by libsignal using Production build variant.
+    ///
+    /// This is a backwards-compatible overload that defaults to Production.
+    ///
+    /// - Parameter remoteConfig: A dictionary containing preprocessed libsignal configuration keys and their associated values
+    @available(
+        *,
+        deprecated,
+        message: "Use setRemoteConfig(_:buildVariant:) instead, explicitly specifying .production or .beta"
+    )
+    public func setRemoteConfig(_ remoteConfig: [String: String]) {
+        self.setRemoteConfig(remoteConfig, buildVariant: .production)
+    }
+
+    /// Notifies libsignal that the network has changed.
+    ///
+    /// This will lead to, e.g. caches being cleared and cooldowns being reset.
+    ///
+    /// No errors are expected to be thrown; this is only to make programmer errors
+    /// recoverable for this particular call.
+    public func networkDidChange() throws {
+        try self.connectionManager.withNativeHandle { connectionManager in
+            try checkError(signal_connection_manager_on_network_change(connectionManager.const()))
+        }
+    }
+
+    /// Get the SVR-B (Secure Value Recovery for Backups) service for this network instance.
+    ///
+    /// SVR-B provides forward secrecy for Signal backups, ensuring that even if the user's
+    /// Account Entropy Pool or Backup Key is compromised, the attacker can gain access to
+    /// only the user's most recent backup. This is achieved by storing the forward secrecy
+    /// token in a secure enclave inside the SVR-B server, which provably attests that it
+    /// only stores a single token at a time for each user.
+    ///
+    /// - Parameter auth: The authentication credentials to use when connecting to the SVR-B server.
+    /// - Returns: An SvrB service instance configured for this network environment
+    /// - SeeAlso: ``SvrB``
+    public func svrB(auth: Auth) -> SvrB {
+        return SvrB(net: self, auth: auth)
     }
 
     /// Like ``cdsiLookup(auth:request:)`` but with the parameters to ``CdsiLookupRequest`` broken out.
@@ -56,10 +229,14 @@ public class Net {
         prevE164s: [String],
         e164s: [String],
         acisAndAccessKeys: [AciAndAccessKey],
-        returnAcisWithoutUaks: Bool,
         token: Data?
     ) async throws -> CdsiLookup {
-        let request = try CdsiLookupRequest(e164s: e164s, prevE164s: prevE164s, acisAndAccessKeys: acisAndAccessKeys, token: token, returnAcisWithoutUaks: returnAcisWithoutUaks)
+        let request = try CdsiLookupRequest(
+            e164s: e164s,
+            prevE164s: prevE164s,
+            acisAndAccessKeys: acisAndAccessKeys,
+            token: token
+        )
         return try await self.cdsiLookup(auth: auth, request: request)
     }
 
@@ -108,28 +285,151 @@ public class Net {
         auth: Auth,
         request: CdsiLookupRequest
     ) async throws -> CdsiLookup {
-        let handle: OpaquePointer = try await self.asyncContext.invokeAsyncFunction { promise, asyncContext in
+        let handle = try await self.asyncContext.invokeAsyncFunction { promise, asyncContext in
             self.connectionManager.withNativeHandle { connectionManager in
                 request.withNativeHandle { request in
-                    signal_cdsi_lookup_new(promise, asyncContext, connectionManager, auth.username, auth.password, request)
+                    signal_cdsi_lookup_new(
+                        promise,
+                        asyncContext.const(),
+                        connectionManager.const(),
+                        auth.username,
+                        auth.password,
+                        request.const()
+                    )
                 }
             }
         }
-        return CdsiLookup(native: handle, asyncContext: self.asyncContext)
+        return CdsiLookup(native: NonNull(handle)!, asyncContext: self.asyncContext)
     }
 
-    public func createChatService(username: String, password: String) -> ChatService {
-        return ChatService(tokioAsyncContext: self.asyncContext, connectionManager: self.connectionManager, username: username, password: password)
+    /// Starts the process of connecting to the chat server.
+    ///
+    /// If this completes successfully, the next call to
+    /// ``connectAuthenticatedChat(username:password:receiveStories:languages:)`` may be able to finish more
+    /// quickly. If it's incomplete or produces an error, such a call will start from scratch as
+    /// usual. Only one preconnect is recorded, so there's no point in calling this more than once.
+    public func preconnectChat() async throws {
+        _ = try await self.asyncContext.invokeAsyncFunction { promise, asyncContext in
+            self.connectionManager.withNativeHandle { connectionManager in
+                signal_authenticated_chat_connection_preconnect(
+                    promise,
+                    asyncContext.const(),
+                    connectionManager.const()
+                )
+            }
+        }
     }
 
-    private var asyncContext: TokioAsyncContext
-    private var connectionManager: ConnectionManager
+    /// Asynchronously establishes an authenticated connection to the remote
+    /// chat service.
+    ///
+    /// Creates a connection to the remote chat service, or throws a
+    /// ``SignalError`` if one cannot be established, or if the connection
+    /// attempt is rejected. Once the connection is established, the returned
+    /// object can be used to send and receive messages after
+    /// ``AuthenticatedChatConnection/start(listener:)`` is called.
+    ///
+    /// - Parameters:
+    ///   - username: The username to provide; this is typically of the form `{aci}.{deviceId}`.
+    ///   - password: The password to provide to the server.
+    ///   - receiveStories: Indicates to the server whether it should send story updates on this connection.
+    ///   - languages: If provided, a list of languages in Accept-Language syntax to apply to all
+    ///     requests made on this connection. Note that "quality weighting" can be left out;
+    ///     the Signal server will always consider the list to be in priority order.
+    ///
+    /// - Throws: ``SignalError/appExpired(_:)`` if the current app version is too old (as judged by
+    ///   the server).
+    /// - Throws: ``SignalError/rateLimitedError(retryAfter:message:)`` if the server
+    ///   response indicates the request should be tried again after some time.
+    /// - Throws: ``SignalError/deviceDeregistered(_:)`` if the server response
+    ///   indicates the device is no longer registered.
+    /// - Throws: ``SignalError/possibleCaptiveNetwork(_:)`` if the server's TLS response
+    ///   suggests a captive network.
+    /// - Throws: Other ``SignalError``s for other kinds of failures.
+    ///
+    /// - Returns:
+    ///   An object representing the established, but not yet active, connection.
+    public func connectAuthenticatedChat(
+        username: String,
+        password: String,
+        receiveStories: Bool,
+        languages: [String] = []
+    ) async throws -> AuthenticatedChatConnection {
+        return try await AuthenticatedChatConnection(
+            tokioAsyncContext: self.asyncContext,
+            connectionManager: self.connectionManager,
+            username: username,
+            password: password,
+            receiveStories: receiveStories,
+            languages: languages
+        )
+    }
+
+    /// Asynchronously establishes an unauthenticated connection to the remote
+    /// chat service.
+    ///
+    /// Creates a connection to the remote chat service, or throws a
+    /// ``SignalError`` if one cannot be established, or if the connection
+    /// attempt is rejected. Once the connection is established, the returned
+    /// object can be used to send and receive messages after
+    /// ``UnauthenticatedChatConnection/start(listener:)`` is called.
+    ///
+    /// - Parameters:
+    ///   - languages: If provided, a list of languages in Accept-Language syntax to apply to all
+    ///     requests made on this connection. Note that "quality weighting" can be left out;
+    ///     the Signal server will always consider the list to be in priority order.
+    ///
+    /// - Throws: ``SignalError/appExpired(_:)`` if the current app version is too old (as judged by
+    ///   the server).
+    /// - Throws: ``SignalError/rateLimitedError(retryAfter:message:)` if the server
+    ///   response indicates the request should be tried again after some time.
+    /// - Throws: ``SignalError/possibleCaptiveNetwork(_:)`` if the server's TLS response
+    ///   suggests a captive network.
+    /// - Throws: Other ``SignalError``s for other kinds of failures.
+    ///
+    /// - Returns:
+    ///   An object representing the established, but not active, connection.
+    public func connectUnauthenticatedChat(languages: [String] = []) async throws -> UnauthenticatedChatConnection {
+        return try await UnauthenticatedChatConnection(
+            tokioAsyncContext: self.asyncContext,
+            connectionManager: self.connectionManager,
+            languages: languages,
+            environment: self.environment
+        )
+    }
+
+    /// Asynchronously establishes a provisioning connection to the remote
+    /// chat service.
+    ///
+    /// Creates a connection to the remote chat service, or throws a
+    /// ``SignalError`` if one cannot be established, or if the connection
+    /// attempt is rejected. Once the connection is established, the returned
+    /// object can be used to receive messages after
+    /// ``ProvisioningConnection/start(listener:)`` is called.
+    ///
+    /// - Throws: ``SignalError/appExpired(_:)`` if the current app version is too old (as judged by
+    ///   the server).
+    /// - Throws: ``SignalError/rateLimitedError(retryAfter:message:)` if the server
+    ///   response indicates the request should be tried again after some time.
+    /// - Throws: Other ``SignalError``s for other kinds of failures.
+    ///
+    /// - Returns:
+    ///   An object representing the established, but not active, connection.
+    public func connectProvisioning() async throws -> ProvisioningConnection {
+        return try await ProvisioningConnection(
+            tokioAsyncContext: self.asyncContext,
+            connectionManager: self.connectionManager,
+        )
+    }
+    internal var asyncContext: TokioAsyncContext
+    internal var connectionManager: ConnectionManager
+    internal let environment: Environment
 }
 
-/// Authentication information used for connecting to CDSI servers.
+/// Authentication information used for connecting to CDS and SVR servers.
 ///
 /// This corresponds to the username/password pair provided by the chat service.
-public struct Auth {
+public struct Auth: Sendable {
     public let username: String
     public let password: String
     public init(username: String, password: String) {
@@ -138,247 +438,146 @@ public struct Auth {
     }
 }
 
+// This test endpoint isn't generated in device builds, to save on code size.
+#if !os(iOS) || targetEnvironment(simulator)
+
 extension Auth {
     // To be used by the tests
     internal init(username: String, enclaveSecret: String) throws {
         let otp = try invokeFnReturningString {
-            signal_create_otp_from_base64($0, username, enclaveSecret)
+            signal_testing_create_otp_from_base64($0, username, enclaveSecret)
         }
         self.init(username: username, password: otp)
     }
 }
 
-public struct AciAndAccessKey {
-    public let aci: Aci
-    public let accessKey: Data
-    public init(aci: Aci, accessKey: Data) {
-        self.aci = aci
-        self.accessKey = accessKey
-    }
-}
+#endif
 
-/// Information passed to the CDSI server when making a request.
-public class CdsiLookupRequest: NativeHandleOwner {
-    /// Indicates whether this request object was constructed with a token.
-    public private(set) var hasToken: Bool = false
-
-    private convenience init() {
-        var handle: OpaquePointer?
-        try! checkError(signal_lookup_request_new(&handle))
-        self.init(owned: handle!)
+internal class ConnectionManager: NativeHandleOwner<SignalMutPointerConnectionManager> {
+    private class ProxyConfig: NativeHandleOwner<SignalMutPointerConnectionProxyConfig> {
+        override class func destroyNativeHandle(
+            _ handle: NonNull<SignalMutPointerConnectionProxyConfig>
+        ) -> SignalFfiErrorRef? {
+            signal_connection_proxy_config_destroy(handle.pointer)
+        }
     }
 
-    /// Creates a new `CdsiLookupRequest` with the provided data.
-    ///
-    /// Phone numbers should be passed in as string-encoded numeric values,
-    /// optionally with a leading `+` character.
-    ///
-    /// - Throws: a ``SignalError`` if any of the arguments are invalid,
-    /// including the phone numbers or the access keys.
-    public convenience init(
-        e164s: [String],
-        prevE164s: [String],
-        acisAndAccessKeys: [AciAndAccessKey],
-        token: Data?,
-        returnAcisWithoutUaks: Bool
-    ) throws {
-        self.init()
-        try self.withNativeHandle { handle in
-            for e164 in e164s {
-                try checkError(signal_lookup_request_add_e164(handle, e164))
+    convenience init(
+        env: Net.Environment,
+        userAgent: String,
+        remoteConfig: [String: String],
+        buildVariant: Net.BuildVariant
+    ) {
+        let handle = remoteConfig.withBridgedStringMap { remoteConfig in
+            failOnError {
+                try invokeFnReturningValueByPointer(.init()) {
+                    signal_connection_manager_new($0, env.rawValue, userAgent, remoteConfig, buildVariant.rawValue)
+                }
             }
+        }
+        self.init(owned: NonNull(handle)!)
+    }
 
-            for prevE164 in prevE164s {
-                try checkError(signal_lookup_request_add_previous_e164(handle, prevE164))
-            }
+    internal func setProxy(scheme: String, host: String, port: UInt16?, username: String?, password: String?) throws {
+        // We have to cast to Int32 because of how the port number is validated...for Java.
+        // But it also lets us distinguish "no port provided".
+        let port = port.map(Int32.init) ?? .min
 
-            for aciAndAccessKey in acisAndAccessKeys {
-                let aci = aciAndAccessKey.aci
-                let accessKey = aciAndAccessKey.accessKey
-                try aci.withPointerToFixedWidthBinary { aci in
-                    try accessKey.withUnsafeBorrowedBuffer { accessKey in
-                        try checkError(signal_lookup_request_add_aci_and_access_key(handle, aci, accessKey))
+        do {
+            let proxyConfig: ProxyConfig = try username.withCString { username in
+                try password.withCString { password in
+                    try invokeFnReturningNativeHandle {
+                        signal_connection_proxy_config_new($0, scheme, host, port, username, password)
                     }
                 }
             }
 
-            if let token = token {
-                try token.withUnsafeBorrowedBuffer { token in
-                    try checkError(signal_lookup_request_set_token(handle, token))
-                }
-                self.hasToken = true
-            }
-
-            try checkError(signal_lookup_request_set_return_acis_without_uaks(handle, returnAcisWithoutUaks))
-        }
-    }
-
-    override internal class func destroyNativeHandle(_ handle: OpaquePointer) -> SignalFfiErrorRef? {
-        signal_lookup_request_destroy(handle)
-    }
-}
-
-/// CDSI lookup in progress.
-///
-/// Returned by ``Net/cdsiLookup(auth:request:)`` when a request is successfully initiated.
-public class CdsiLookup {
-    class NativeCdsiLookup: NativeHandleOwner {
-        override internal class func destroyNativeHandle(_ handle: OpaquePointer) -> SignalFfiErrorRef? {
-            signal_cdsi_lookup_destroy(handle)
-        }
-    }
-
-    private var asyncContext: TokioAsyncContext
-    private var native: NativeCdsiLookup
-
-    internal init(native: OpaquePointer, asyncContext: TokioAsyncContext) {
-        self.native = NativeCdsiLookup(owned: native)
-        self.asyncContext = asyncContext
-    }
-
-    /// The token returned by the CDSI server.
-    ///
-    /// Clients can save this and pass it with future request to avoid getting
-    /// "charged" for rate-limiting purposes for lookups of the same phone
-    /// numbers.
-    public var token: Data {
-        failOnError {
-            try self.native.withNativeHandle { handle in
-                try invokeFnReturningData {
-                    signal_cdsi_lookup_token($0, handle)
+            try proxyConfig.withNativeHandle { proxyConfig in
+                try self.withNativeHandle {
+                    try checkError(signal_connection_manager_set_proxy($0.const(), proxyConfig.const()))
                 }
             }
+        } catch {
+            self.setInvalidProxy()
+            throw error
         }
     }
 
-    /// Asynchronously waits for the request to complete and returns the response.
-    ///
-    /// After this method is called on a ``CdsiLookup`` object, the object
-    /// should not be used again.
-    ///
-    /// - Returns: The collected data from the server.
-    ///
-    /// - Throws: ``SignalError`` if the request fails for any reason, including
-    ///   `SignalError.networkError` for a network-level connectivity issue,
-    ///   `SignalError.networkProtocolError` for a CDSI or attested connection protocol issue.
-    public func complete() async throws -> CdsiLookupResponse {
-        let response: SignalFfiCdsiLookupResponse = try await self.asyncContext.invokeAsyncFunction { promise, asyncContext in
-            self.native.withNativeHandle { handle in
-                signal_cdsi_lookup_complete(promise, asyncContext, handle)
-            }
-        }
-
-        return CdsiLookupResponse(entries: LookupResponseEntryList(owned: response.entries), debugPermitsUsed: response.debug_permits_used)
-    }
-}
-
-/// Response to the server produced by a completed ``CdsiLookup``.
-///
-/// Returned by ``CdsiLookup/complete()`` on success.
-public struct CdsiLookupResponse {
-    /// The entries received from the server.
-    public let entries: LookupResponseEntryList
-    /// How many "permits" were used in making the request.
-    public let debugPermitsUsed: Int32
-}
-
-/// Entries received from the CDSI server in response to a lookup request.
-///
-/// Contains a sequence of ``CdsiLookupResponseEntry`` values. Conforms
-/// to the `Collection` protocol to allow indexing and iteration over those
-/// values.
-public class LookupResponseEntryList: Collection {
-    private var owned: UnsafeMutableBufferPointer<CdsiLookupResponseEntry>
-
-    init(owned: SignalOwnedBufferOfFfiCdsiLookupResponseEntry) {
-        self.owned = UnsafeMutableBufferPointer(start: owned.base, count: Int(owned.length))
-    }
-
-    deinit {
-        signal_free_lookup_response_entry_list(SignalOwnedBufferOfFfiCdsiLookupResponseEntry(base: self.owned.baseAddress, length: self.owned.count))
-    }
-
-    public typealias Index = UnsafeMutableBufferPointer<CdsiLookupResponseEntry>.Index
-    public typealias Element = UnsafeMutableBufferPointer<CdsiLookupResponseEntry>.Element
-    public typealias SubSequence = UnsafeMutableBufferPointer<CdsiLookupResponseEntry>.SubSequence
-
-    public var startIndex: Index { self.owned.startIndex }
-
-    public var endIndex: Index { self.owned.endIndex }
-
-    public func index(after: Index) -> Index {
-        self.owned.index(after: after)
-    }
-
-    public subscript(position: Index) -> Element { self.owned[position] }
-    public subscript(bounds: Range<Index>) -> SubSequence { self.owned[bounds] }
-}
-
-let nilUuid = uuid_t(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-
-/// Entry contained in a successful CDSI lookup response.
-///
-/// See ``CdsiLookupResponseEntryProtocol`` (which this type conforms to) for
-/// getters for the various fields.
-public typealias CdsiLookupResponseEntry = SignalFfiCdsiLookupResponseEntry
-
-/// Getters for an entry in a CDSI lookup response.
-public protocol CdsiLookupResponseEntryProtocol {
-    /// The ACI in the response, if there was any.
-    var aci: Aci? { get }
-    /// The PNI in the response, if there was any.
-    var pni: Pni? { get }
-    /// The unformatted phone number for the entry.
-    var e164: UInt64 { get }
-}
-
-extension CdsiLookupResponseEntry: CdsiLookupResponseEntryProtocol {
-    public var aci: Aci? {
-        let aciUuid = UUID(uuid: self.rawAciUuid)
-        return aciUuid != UUID(uuid: nilUuid) ? Aci(fromUUID: aciUuid) : nil
-    }
-
-    public var pni: Pni? {
-        let pniUuid = UUID(uuid: self.rawPniUuid)
-        return pniUuid != UUID(uuid: nilUuid) ? Pni(fromUUID: pniUuid) : nil
-    }
-
-    init(e164: UInt64, _ aci: Aci?, _ pni: Pni?) {
-        self.init(
-            e164: e164,
-            rawAciUuid: aci?.rawUUID.uuid ?? nilUuid,
-            rawPniUuid: pni?.rawUUID.uuid ?? nilUuid
-        )
-    }
-}
-
-extension CdsiLookupResponseEntry: Equatable {
-    public static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.aci == rhs.aci && lhs.pni == rhs.pni && lhs.e164 == rhs.e164
-    }
-}
-
-internal class ConnectionManager: NativeHandleOwner {
-    convenience init(env: Net.Environment, userAgent: String) {
-        var handle: OpaquePointer?
-        failOnError(signal_connection_manager_new(&handle, env.rawValue, userAgent))
-        self.init(owned: handle!)
-    }
-
-    internal func setProxy(host: String, port: UInt16) throws {
-        try self.withNativeHandle {
-            // We have to cast to Int32 because of how the port number is validated...for Java.
-            try checkError(signal_connection_manager_set_proxy($0, host, Int32(port)))
+    internal func setInvalidProxy() {
+        self.withNativeHandle {
+            failOnError(signal_connection_manager_set_invalid_proxy($0.const()))
         }
     }
 
     internal func clearProxy() {
         self.withNativeHandle {
-            failOnError(signal_connection_manager_clear_proxy($0))
+            failOnError(signal_connection_manager_clear_proxy($0.const()))
         }
     }
 
-    override internal class func destroyNativeHandle(_ handle: OpaquePointer) -> SignalFfiErrorRef? {
-        signal_connection_manager_destroy(handle)
+    internal func setCensorshipCircumventionEnabled(_ enabled: Bool) {
+        self.withNativeHandle {
+            failOnError(signal_connection_manager_set_censorship_circumvention_enabled($0.const(), enabled))
+        }
+    }
+
+    internal func setRemoteConfig(_ remoteConfig: [String: String], buildVariant: Net.BuildVariant) {
+        remoteConfig.withBridgedStringMap { remoteConfig in
+            self.withNativeHandle {
+                failOnError(
+                    signal_connection_manager_set_remote_config($0.const(), remoteConfig, buildVariant.rawValue)
+                )
+            }
+        }
+    }
+
+    override internal class func destroyNativeHandle(
+        _ handle: NonNull<SignalMutPointerConnectionManager>
+    ) -> SignalFfiErrorRef? {
+        signal_connection_manager_destroy(handle.pointer)
+    }
+}
+
+extension SignalMutPointerConnectionManager: SignalMutPointer {
+    public typealias ConstPointer = SignalConstPointerConnectionManager
+
+    public init(untyped: OpaquePointer?) {
+        self.init(raw: untyped)
+    }
+
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+
+    public func const() -> Self.ConstPointer {
+        Self.ConstPointer(raw: self.raw)
+    }
+}
+
+extension SignalConstPointerConnectionManager: SignalConstPointer {
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+}
+
+extension SignalMutPointerConnectionProxyConfig: SignalMutPointer {
+    public typealias ConstPointer = SignalConstPointerConnectionProxyConfig
+
+    public init(untyped: OpaquePointer?) {
+        self.init(raw: untyped)
+    }
+
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+
+    public func const() -> Self.ConstPointer {
+        Self.ConstPointer(raw: self.raw)
+    }
+}
+
+extension SignalConstPointerConnectionProxyConfig: SignalConstPointer {
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
     }
 }

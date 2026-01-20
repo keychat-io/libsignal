@@ -12,19 +12,18 @@
 use partial_default::PartialDefault;
 use serde::{Deserialize, Serialize};
 
+use super::{CallLinkPublicParams, CallLinkSecretParams};
+use crate::ZkGroupVerificationFailure;
 use crate::common::serialization::ReservedByte;
 use crate::common::simple_types::*;
 use crate::crypto::uid_encryption;
 use crate::crypto::uid_struct::UidStruct;
 use crate::generic_server_params::{GenericServerPublicParams, GenericServerSecretParams};
 use crate::groups::UuidCiphertext;
-use crate::ZkGroupVerificationFailure;
-
-use super::{CallLinkPublicParams, CallLinkSecretParams};
 
 const CREDENTIAL_LABEL: &[u8] = b"20230421_Signal_CallLinkAuthCredential";
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct CallLinkAuthCredentialResponse {
     reserved: ReservedByte,
     proof: zkcredential::issuance::IssuanceProof,
@@ -71,7 +70,7 @@ impl CallLinkAuthCredentialResponse {
     }
 }
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct CallLinkAuthCredential {
     reserved: ReservedByte,
     credential: zkcredential::credentials::Credential,
@@ -101,7 +100,7 @@ impl CallLinkAuthCredential {
     }
 }
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct CallLinkAuthCredentialPresentation {
     reserved: ReservedByte,
     pub(crate) proof: zkcredential::presentation::PresentationProof,

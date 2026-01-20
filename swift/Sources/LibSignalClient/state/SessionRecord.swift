@@ -6,29 +6,34 @@
 import Foundation
 import SignalFfi
 
-public class SessionRecord: ClonableHandleOwner {
-    override internal class func destroyNativeHandle(_ handle: OpaquePointer) -> SignalFfiErrorRef? {
-        return signal_session_record_destroy(handle)
+public class SessionRecord: ClonableHandleOwner<SignalMutPointerSessionRecord> {
+    override internal class func destroyNativeHandle(
+        _ handle: NonNull<SignalMutPointerSessionRecord>
+    ) -> SignalFfiErrorRef? {
+        return signal_session_record_destroy(handle.pointer)
     }
 
-    override internal class func cloneNativeHandle(_ newHandle: inout OpaquePointer?, currentHandle: OpaquePointer?) -> SignalFfiErrorRef? {
+    override internal class func cloneNativeHandle(
+        _ newHandle: inout SignalMutPointerSessionRecord,
+        currentHandle: SignalConstPointerSessionRecord
+    ) -> SignalFfiErrorRef? {
         return signal_session_record_clone(&newHandle, currentHandle)
     }
 
     public convenience init<Bytes: ContiguousBytes>(bytes: Bytes) throws {
-        let handle: OpaquePointer? = try bytes.withUnsafeBorrowedBuffer {
-            var result: OpaquePointer?
-            try checkError(signal_session_record_deserialize(&result, $0))
-            return result
+        let handle = try bytes.withUnsafeBorrowedBuffer { bytes in
+            try invokeFnReturningValueByPointer(.init()) {
+                signal_session_record_deserialize($0, bytes)
+            }
         }
-        self.init(owned: handle!)
+        self.init(owned: NonNull(handle)!)
     }
 
-    public func serialize() -> [UInt8] {
+    public func serialize() -> Data {
         return self.withNativeHandle { nativeHandle in
             failOnError {
-                try invokeFnReturningArray {
-                    signal_session_record_serialize($0, nativeHandle)
+                try invokeFnReturningData {
+                    signal_session_record_serialize($0, nativeHandle.const())
                 }
             }
         }
@@ -39,11 +44,17 @@ public class SessionRecord: ClonableHandleOwner {
     }
 
     public func hasCurrentState(now: Date) -> Bool {
-        var result = false
-        self.withNativeHandle { nativeHandle in
-            failOnError(signal_session_record_has_usable_sender_chain(&result, nativeHandle, UInt64(now.timeIntervalSince1970 * 1000)))
+        return self.withNativeHandle { nativeHandle in
+            failOnError {
+                try invokeFnReturningBool {
+                    signal_session_record_has_usable_sender_chain(
+                        $0,
+                        nativeHandle.const(),
+                        UInt64(now.timeIntervalSince1970 * 1000)
+                    )
+                }
+            }
         }
-        return result
     }
 
     public func archiveCurrentState() {
@@ -55,16 +66,38 @@ public class SessionRecord: ClonableHandleOwner {
     public func remoteRegistrationId() throws -> UInt32 {
         return try self.withNativeHandle { nativeHandle in
             try invokeFnReturningInteger {
-                signal_session_record_get_remote_registration_id($0, nativeHandle)
+                signal_session_record_get_remote_registration_id($0, nativeHandle.const())
             }
         }
     }
 
     public func currentRatchetKeyMatches(_ key: PublicKey) throws -> Bool {
-        var result = false
-        try withNativeHandles(self, key) { sessionHandle, keyHandle in
-            try checkError(signal_session_record_current_ratchet_key_matches(&result, sessionHandle, keyHandle))
+        return try withAllBorrowed(self, key) { sessionHandle, keyHandle in
+            try invokeFnReturningBool {
+                signal_session_record_current_ratchet_key_matches($0, sessionHandle.const(), keyHandle.const())
+            }
         }
-        return result
+    }
+}
+
+extension SignalMutPointerSessionRecord: SignalMutPointer {
+    public typealias ConstPointer = SignalConstPointerSessionRecord
+
+    public init(untyped: OpaquePointer?) {
+        self.init(raw: untyped)
+    }
+
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+
+    public func const() -> Self.ConstPointer {
+        Self.ConstPointer(raw: self.raw)
+    }
+}
+
+extension SignalConstPointerSessionRecord: SignalConstPointer {
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
     }
 }

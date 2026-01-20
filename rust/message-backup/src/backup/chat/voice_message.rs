@@ -2,21 +2,28 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+#[cfg(test)]
+use derive_where::derive_where;
+
+use crate::backup::TryIntoWith;
 use crate::backup::chat::quote::{Quote, QuoteError};
-use crate::backup::chat::{Reaction, ReactionError};
-use crate::backup::file::{VoiceMessageAttachment, VoiceMessageAttachmentError};
+use crate::backup::chat::{ReactionError, ReactionSet};
+use crate::backup::file::{MessageAttachment, MessageAttachmentError};
 use crate::backup::frame::RecipientId;
-use crate::backup::method::Contains;
-use crate::backup::{TryFromWith, TryIntoWith as _};
+use crate::backup::method::LookupPair;
+use crate::backup::recipient::MinimalRecipientData;
+use crate::backup::serialize::SerializeOrder;
+use crate::backup::time::ReportUnusualTimestamp;
 use crate::proto::backup as proto;
 
 /// Validated version of a voice message [`proto::StandardMessage`].
-#[derive(Debug)]
-#[cfg_attr(test, derive(PartialEq))]
-pub struct VoiceMessage {
-    pub quote: Option<Quote>,
-    pub reactions: Vec<Reaction>,
-    pub attachment: VoiceMessageAttachment,
+#[derive(Debug, serde::Serialize)]
+#[cfg_attr(test, derive_where(PartialEq; Recipient: PartialEq + SerializeOrder))]
+pub struct VoiceMessage<Recipient> {
+    pub quote: Option<Quote<Recipient>>,
+    #[serde(bound(serialize = "Recipient: serde::Serialize + SerializeOrder"))]
+    pub reactions: ReactionSet<Recipient>,
+    pub attachment: Box<MessageAttachment>,
     _limit_construction_to_module: (),
 }
 
@@ -24,21 +31,25 @@ pub struct VoiceMessage {
 #[cfg_attr(test, derive(PartialEq))]
 pub enum VoiceMessageError {
     /// attachment: {0}
-    Attachment(#[from] VoiceMessageAttachmentError),
+    Attachment(#[from] MessageAttachmentError),
     /// has unexpected field {0}
     UnexpectedField(&'static str),
     /// has {0} attachments
     WrongAttachmentsCount(usize),
+    /// attachment should be a VOICE_MESSAGE, but was {0:?}
+    WrongAttachmentType(proto::message_attachment::Flag),
     /// invalid quote: {0}
     Quote(#[from] QuoteError),
     /// invalid reaction: {0}
     Reaction(#[from] ReactionError),
 }
 
-impl<R: Contains<RecipientId>> TryFromWith<proto::StandardMessage, R> for VoiceMessage {
+impl<R: Clone, C: LookupPair<RecipientId, MinimalRecipientData, R> + ReportUnusualTimestamp>
+    TryIntoWith<VoiceMessage<R>, C> for proto::StandardMessage
+{
     type Error = VoiceMessageError;
 
-    fn try_from_with(item: proto::StandardMessage, context: &R) -> Result<Self, Self::Error> {
+    fn try_into_with(self, context: &C) -> Result<VoiceMessage<R>, Self::Error> {
         let proto::StandardMessage {
             quote,
             reactions,
@@ -47,7 +58,7 @@ impl<R: Contains<RecipientId>> TryFromWith<proto::StandardMessage, R> for VoiceM
             linkPreview,
             longText,
             special_fields: _,
-        } = item;
+        } = self;
 
         match () {
             _ if text.is_some() => Err("text"),
@@ -60,21 +71,23 @@ impl<R: Contains<RecipientId>> TryFromWith<proto::StandardMessage, R> for VoiceM
         let [attachment] = <[_; 1]>::try_from(attachments)
             .map_err(|attachments| VoiceMessageError::WrongAttachmentsCount(attachments.len()))?;
 
-        let attachment = attachment.try_into()?;
+        let attachment: MessageAttachment = attachment.try_into_with(context)?;
+
+        if attachment.flag != proto::message_attachment::Flag::VOICE_MESSAGE {
+            return Err(VoiceMessageError::WrongAttachmentType(attachment.flag));
+        }
 
         let quote = quote
             .into_option()
             .map(|q| q.try_into_with(context))
             .transpose()?;
-        let reactions = reactions
-            .into_iter()
-            .map(|r| r.try_into_with(context))
-            .collect::<Result<_, _>>()?;
 
-        Ok(Self {
+        let reactions = reactions.try_into_with(context)?;
+
+        Ok(VoiceMessage {
             reactions,
             quote,
-            attachment,
+            attachment: Box::new(attachment),
             _limit_construction_to_module: (),
         })
     }
@@ -84,11 +97,10 @@ impl<R: Contains<RecipientId>> TryFromWith<proto::StandardMessage, R> for VoiceM
 mod test {
     use test_case::test_case;
 
-    use crate::backup::chat::testutil::{
-        extra_attachment, invalid_reaction, no_attachments, no_quote, no_reactions, TestContext,
-    };
-
     use super::*;
+    use crate::backup::chat::Reaction;
+    use crate::backup::recipient::FullRecipientData;
+    use crate::backup::testutil::TestContext;
 
     #[test]
     fn valid_voice_message() {
@@ -97,31 +109,24 @@ mod test {
                 .try_into_with(&TestContext::default()),
             Ok(VoiceMessage {
                 quote: Some(Quote::from_proto_test_data()),
-                reactions: vec![Reaction::from_proto_test_data()],
-                attachment: VoiceMessageAttachment::default(),
+                reactions: ReactionSet::from_iter([Reaction::from_proto_test_data()]),
+                attachment: Box::new(MessageAttachment::from_proto_voice_message_data()),
                 _limit_construction_to_module: ()
             })
         )
     }
 
-    #[test_case(no_reactions, Ok(()))]
-    #[test_case(
-        invalid_reaction,
-        Err(VoiceMessageError::Reaction(ReactionError::EmptyEmoji))
-    )]
-    #[test_case(no_quote, Ok(()))]
-    #[test_case(no_attachments, Err(VoiceMessageError::WrongAttachmentsCount(0)))]
-    #[test_case(extra_attachment, Err(VoiceMessageError::WrongAttachmentsCount(2)))]
-    fn voice_message(
-        modifier: fn(&mut proto::StandardMessage),
-        expected: Result<(), VoiceMessageError>,
-    ) {
+    #[test_case(|x| x.reactions.clear() => Ok(()); "no reactions")]
+    #[test_case(|x| x.reactions.push(proto::Reaction::default()) => Err(VoiceMessageError::Reaction(ReactionError::EmptyEmoji)); "invalid reaction")]
+    #[test_case(|x| x.quote = None.into() => Ok(()); "no quote")]
+    #[test_case(|x| x.attachments.clear() => Err(VoiceMessageError::WrongAttachmentsCount(0)); "no attachments")]
+    #[test_case(|x| x.attachments.push(proto::MessageAttachment::default()) => Err(VoiceMessageError::WrongAttachmentsCount(2)); "extra attachment")]
+    fn voice_message(modifier: fn(&mut proto::StandardMessage)) -> Result<(), VoiceMessageError> {
         let mut message = proto::StandardMessage::test_voice_message_data();
         modifier(&mut message);
 
-        let result = message
+        message
             .try_into_with(&TestContext::default())
-            .map(|_: VoiceMessage| ());
-        assert_eq!(result, expected);
+            .map(|_: VoiceMessage<FullRecipientData>| ())
     }
 }

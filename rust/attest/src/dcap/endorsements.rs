@@ -8,19 +8,18 @@
 //! through the Intel Provisioning Certification Service (PCS), or a cache (PCCS).
 //! For specification of the json data structures within the OE structures,
 //! see <https://api.portal.trustedservices.intel.com/documentation>
-use boring::ec::EcKeyRef;
-use boring::ecdsa::{EcdsaSig, EcdsaSigRef};
-use boring::pkey::Public;
+use std::time::SystemTime;
+
+use boring_signal::ec::EcKeyRef;
+use boring_signal::ecdsa::{EcdsaSig, EcdsaSigRef};
+use boring_signal::pkey::Public;
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use strum::EnumCount;
 
-use std::intrinsics::transmute;
-use std::time::SystemTime;
-
 use crate::cert_chain::CertChain;
-use crate::dcap::ecdsa::{deserialize_ecdsa_signature, EcdsaSigned};
+use crate::dcap::ecdsa::{EcdsaSigned, deserialize_ecdsa_signature};
 use crate::dcap::revocation_list::RevocationList;
 use crate::dcap::{Error, Expireable, Result};
 use crate::endian::UInt32LE;
@@ -82,38 +81,32 @@ impl TryFrom<&[u8]> for SgxEndorsements {
     type Error = Error;
 
     fn try_from(mut src: &[u8]) -> super::Result<Self> {
-        if src.len() < std::mem::size_of::<EndorsementsHeader>() {
-            return Err(Error::new("too short"));
-        }
+        let header: EndorsementsHeader =
+            util::read_from_bytes(&mut src).ok_or_else(|| Error::new("too short"))?;
 
-        let header_slice = util::read_bytes(&mut src, std::mem::size_of::<EndorsementsHeader>());
-        let mut header_bytes = [0u8; std::mem::size_of::<EndorsementsHeader>()];
-        header_bytes.copy_from_slice(header_slice);
-
-        let header = EndorsementsHeader::try_from(header_bytes)?;
-
-        if header.version.value() != 1 {
+        if header.version.get() != 1 {
             return Err(Error::new(format!(
                 "unsupported endorsements version {}",
-                header.version.value()
+                header.version.get()
             )));
         }
 
-        if header.enclave_type.value() != 2 {
+        if header.enclave_type.get() != 2 {
             return Err(Error::new(format!(
                 "unsupported enclave type {}",
-                header.enclave_type.value()
+                header.enclave_type.get()
             )));
         }
 
         let offsets_required_size =
-            std::mem::size_of::<u32>() * (header.num_elements.value() as usize);
+            std::mem::size_of::<u32>() * (header.num_elements.get() as usize);
         if src.len() < offsets_required_size {
             return Err(Error::new("not enough data for offsets"));
         }
 
         let (offsets, data) = src.split_at(offsets_required_size);
 
+        // TODO: Use as_chunks instead at MSRV 1.88.
         let offsets = offsets
             .chunks_exact(4)
             .map(|d| u32::from_le_bytes(d.try_into().expect("correct size")) as usize)
@@ -150,8 +143,7 @@ impl TryFrom<&[u8]> for SgxEndorsements {
 
         if version != OE_ENDORSEMENTS_V1 {
             return Err(Error::new(format!(
-                "unsupported SGX endorsement version {}",
-                version
+                "unsupported SGX endorsement version {version}"
             )));
         }
 
@@ -248,14 +240,14 @@ fn der_crl_for_field(
 ) -> Result<RevocationList> {
     let data = data_for_field(field, offsets, data);
 
-    RevocationList::from_der_data(data).with_context(|| format!("{:?}", field))
+    RevocationList::from_der_data(data).with_context(|| format!("{field:?}"))
 }
 
 fn string_for_field(field: SgxEndorsementField, offsets: &[usize], data: &[u8]) -> Result<String> {
     let mut bytes = data_for_field(field, offsets, data);
     util::strip_trailing_null_byte(&mut bytes);
 
-    String::from_utf8(Vec::from(bytes)).map_err(|e| Error::from(e).context(format!("{:?}", field)))
+    String::from_utf8(Vec::from(bytes)).map_err(|e| Error::from(e).context(format!("{field:?}")))
 }
 
 fn data_for_field<'a>(field: SgxEndorsementField, offsets: &[usize], data: &'a [u8]) -> &'a [u8] {
@@ -267,7 +259,7 @@ fn data_for_field<'a>(field: SgxEndorsementField, offsets: &[usize], data: &'a [
     &data[offsets[index]..offsets[index + 1]]
 }
 
-#[derive(Debug)]
+#[derive(Debug, zerocopy::FromBytes)]
 #[repr(C)]
 pub(crate) struct EndorsementsHeader {
     // include/openenclave/bits/attestation.h
@@ -288,17 +280,10 @@ pub(crate) struct EndorsementsHeader {
 static_assertions::const_assert_eq!(1, std::mem::align_of::<EndorsementsHeader>());
 static_assertions::const_assert_eq!(16, std::mem::size_of::<EndorsementsHeader>());
 
-impl TryFrom<[u8; std::mem::size_of::<EndorsementsHeader>()]> for EndorsementsHeader {
-    type Error = super::Error;
-
-    fn try_from(src: [u8; std::mem::size_of::<EndorsementsHeader>()]) -> super::Result<Self> {
-        unsafe { Ok(transmute(src)) }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use hex_literal::hex;
+    use const_str::hex;
+    use zerocopy::FromBytes;
 
     use super::*;
 
@@ -320,16 +305,12 @@ mod tests {
 
     #[test]
     fn make_endorsements_header() {
-        let data: [u8; std::mem::size_of::<EndorsementsHeader>()] =
-            include_bytes!("../../tests/data/dcap.endorsements")
-                [..std::mem::size_of::<EndorsementsHeader>()]
-                .try_into()
-                .unwrap();
+        let data: &[u8] = include_bytes!("../../tests/data/dcap.endorsements");
+        let (header, _remaining) =
+            EndorsementsHeader::read_from_prefix(data).expect("failed to parse header");
 
-        let header = EndorsementsHeader::try_from(data).expect("failed to parse header");
-
-        assert_eq!(1, header.version.value());
-        assert_eq!(2, header.enclave_type.value()) // oe_enclave_type_t (include/openenclave/bits/types.h)
+        assert_eq!(1, header.version.get());
+        assert_eq!(2, header.enclave_type.get()) // oe_enclave_type_t (include/openenclave/bits/types.h)
     }
 
     #[test]
@@ -342,9 +323,11 @@ mod tests {
             TcbStatus::SWHardeningNeeded,
             tcb_info.tcb_levels[0].tcb_status
         );
-        assert!(tcb_info.tcb_levels[0]
-            .advisory_ids
-            .contains(&"INTEL-SA-00657".to_owned()));
+        assert!(
+            tcb_info.tcb_levels[0]
+                .advisory_ids
+                .contains(&"INTEL-SA-00657".to_owned())
+        );
         assert_eq!(
             [7, 9, 3, 3, 255, 255, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             tcb_info.tcb_levels[0].tcb.components()
@@ -656,9 +639,9 @@ pub(crate) struct EnclaveIdentity {
     _issue_date: chrono::DateTime<Utc>,
     pub next_update: chrono::DateTime<Utc>,
     _tcb_evaluation_data_number: u16,
-    #[serde(with = "hex")]
+    #[serde(deserialize_with = "deserialize_u32_hex")]
     pub miscselect: UInt32LE,
-    #[serde(with = "hex")]
+    #[serde(deserialize_with = "deserialize_u32_hex")]
     pub miscselect_mask: UInt32LE,
     #[serde(with = "hex")]
     pub attributes: [u8; 16],
@@ -668,6 +651,14 @@ pub(crate) struct EnclaveIdentity {
     pub mrsigner: [u8; 32],
     pub isvprodid: u16,
     pub tcb_levels: Vec<QeTcbLevel>,
+}
+
+fn deserialize_u32_hex<'de, D>(deserializer: D) -> std::result::Result<UInt32LE, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: [u8; 4] = hex::deserialize(deserializer)?;
+    Ok(value.into())
 }
 
 impl EnclaveIdentity {

@@ -6,9 +6,14 @@
 import Foundation
 import SignalFfi
 
-public enum Direction {
+public enum Direction: Sendable {
     case sending
     case receiving
+}
+
+public enum IdentityChange: Sendable {
+    case newOrUnchanged
+    case replacedExisting
 }
 
 /// A marker protocol, which must be downcast to use in any particular store.
@@ -19,8 +24,17 @@ public protocol StoreContext {}
 public protocol IdentityKeyStore: AnyObject {
     func identityKeyPair(context: StoreContext) throws -> IdentityKeyPair
     func localRegistrationId(context: StoreContext) throws -> UInt32
-    func saveIdentity(_ identity: IdentityKey, for address: ProtocolAddress, context: StoreContext) throws -> Bool
-    func isTrustedIdentity(_ identity: IdentityKey, for address: ProtocolAddress, direction: Direction, context: StoreContext) throws -> Bool
+    func saveIdentity(
+        _ identity: IdentityKey,
+        for address: ProtocolAddress,
+        context: StoreContext
+    ) throws -> IdentityChange
+    func isTrustedIdentity(
+        _ identity: IdentityKey,
+        for address: ProtocolAddress,
+        direction: Direction,
+        context: StoreContext
+    ) throws -> Bool
     func identity(for address: ProtocolAddress, context: StoreContext) throws -> IdentityKey?
 }
 
@@ -38,7 +52,7 @@ public protocol SignedPreKeyStore: AnyObject {
 public protocol KyberPreKeyStore: AnyObject {
     func loadKyberPreKey(id: UInt32, context: StoreContext) throws -> KyberPreKeyRecord
     func storeKyberPreKey(_ record: KyberPreKeyRecord, id: UInt32, context: StoreContext) throws
-    func markKyberPreKeyUsed(id: UInt32, context: StoreContext) throws
+    func markKyberPreKeyUsed(id: UInt32, signedPreKeyId: UInt32, baseKey: PublicKey, context: StoreContext) throws
 }
 
 public protocol SessionStore: AnyObject {
@@ -48,6 +62,15 @@ public protocol SessionStore: AnyObject {
 }
 
 public protocol SenderKeyStore: AnyObject {
-    func storeSenderKey(from sender: ProtocolAddress, distributionId: UUID, record: SenderKeyRecord, context: StoreContext) throws
-    func loadSenderKey(from sender: ProtocolAddress, distributionId: UUID, context: StoreContext) throws -> SenderKeyRecord?
+    func storeSenderKey(
+        from sender: ProtocolAddress,
+        distributionId: UUID,
+        record: SenderKeyRecord,
+        context: StoreContext
+    ) throws
+    func loadSenderKey(
+        from sender: ProtocolAddress,
+        distributionId: UUID,
+        context: StoreContext
+    ) throws -> SenderKeyRecord?
 }

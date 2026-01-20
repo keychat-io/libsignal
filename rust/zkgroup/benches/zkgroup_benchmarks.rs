@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator as _};
 use zkgroup::SECONDS_PER_DAY;
+use zkgroup::auth::AuthCredentialWithPniZkcResponse;
 
 fn benchmark_integration_auth(c: &mut Criterion) {
     let server_secret_params = zkgroup::ServerSecretParams::generate(zkgroup::TEST_ARRAY_32);
@@ -19,44 +20,42 @@ fn benchmark_integration_auth(c: &mut Criterion) {
     // Random UID and issueTime
     let aci = libsignal_core::Aci::from_uuid_bytes(zkgroup::TEST_ARRAY_16);
     let pni = libsignal_core::Pni::from_uuid_bytes(zkgroup::TEST_ARRAY_16_1);
-    let redemption_time = zkgroup::Timestamp::from_epoch_seconds(123456);
+    let redemption_time = zkgroup::Timestamp::from_epoch_seconds(123456 * SECONDS_PER_DAY);
 
     // SERVER
     // Issue credential
     let randomness = zkgroup::TEST_ARRAY_32_2;
-    let auth_credential_response = server_secret_params
-        .issue_auth_credential_with_pni_as_service_id(randomness, aci, pni, redemption_time);
+    let auth_credential_response = AuthCredentialWithPniZkcResponse::issue_credential(
+        aci,
+        pni,
+        redemption_time,
+        &server_secret_params,
+        randomness,
+    );
 
-    c.bench_function("issue_auth_credential_with_pni_as_service_id", |b| {
+    c.bench_function("issue_auth_credential", |b| {
         b.iter(|| {
-            server_secret_params.issue_auth_credential_with_pni_as_service_id(
-                randomness,
+            AuthCredentialWithPniZkcResponse::issue_credential(
                 aci,
                 pni,
                 redemption_time,
+                &server_secret_params,
+                randomness,
             )
         })
     });
 
     // CLIENT
-    let auth_credential = server_public_params
-        .receive_auth_credential_with_pni_as_service_id(
-            aci,
-            pni,
-            redemption_time,
-            auth_credential_response.clone(),
-        )
+    let auth_credential = auth_credential_response
+        .clone()
+        .receive(aci, pni, redemption_time, &server_public_params)
         .unwrap();
 
     c.bench_function("receive_auth_credential", |b| {
         b.iter(|| {
-            server_public_params
-                .receive_auth_credential_with_pni_as_service_id(
-                    aci,
-                    pni,
-                    redemption_time,
-                    auth_credential_response.clone(),
-                )
+            auth_credential_response
+                .clone()
+                .receive(aci, pni, redemption_time, &server_public_params)
                 .unwrap()
         })
     });
@@ -71,23 +70,14 @@ fn benchmark_integration_auth(c: &mut Criterion) {
     // Create and receive presentation
     let randomness = zkgroup::TEST_ARRAY_32_5;
 
-    let presentation_v2 = server_public_params.create_auth_credential_with_pni_presentation(
-        randomness,
-        group_secret_params,
-        auth_credential.clone(),
-    );
+    let presentation =
+        auth_credential.present(&server_public_params, &group_secret_params, randomness);
 
-    c.bench_function("create_auth_credential_with_pni_presentation", |b| {
-        b.iter(|| {
-            server_public_params.create_auth_credential_with_pni_presentation(
-                randomness,
-                group_secret_params,
-                auth_credential.clone(),
-            )
-        })
+    c.bench_function("create_auth_credential_presentation_v2", |b| {
+        b.iter(|| auth_credential.present(&server_public_params, &group_secret_params, randomness))
     });
 
-    let _presentation_bytes = &bincode::serialize(&presentation_v2).unwrap();
+    let _presentation_bytes = &bincode::serialize(&presentation).unwrap();
 
     //for b in presentation_bytes.iter() {
     //    print!("0x{:02x}, ", b);
@@ -96,12 +86,8 @@ fn benchmark_integration_auth(c: &mut Criterion) {
 
     c.bench_function("verify_auth_credential_presentation_v2", |b| {
         b.iter(|| {
-            server_secret_params
-                .verify_auth_credential_presentation(
-                    group_public_params,
-                    &presentation_v2,
-                    redemption_time,
-                )
+            presentation
+                .verify(&server_secret_params, &group_public_params, redemption_time)
                 .unwrap();
         })
     });
@@ -290,6 +276,13 @@ pub fn benchmark_group_send_endorsements(c: &mut Criterion) {
 
     let aci = libsignal_core::Aci::from_uuid_bytes(zkgroup::TEST_ARRAY_16);
 
+    // Use cfg!(debug_assertions) as a proxy for "no optimizations".
+    let group_sizes: &[usize] = if cfg!(debug_assertions) {
+        &[50]
+    } else {
+        &[2, 5, 10, 100, 1000]
+    };
+
     let all_members: Vec<libsignal_core::ServiceId> = std::iter::once(aci)
         .chain((1u16..).map(|i| {
             // Generate arbitrary v5 (hash-based) UUIDs for the rest of the group.
@@ -299,7 +292,7 @@ pub fn benchmark_group_send_endorsements(c: &mut Criterion) {
             ))
         }))
         .map(libsignal_core::ServiceId::from)
-        .take(1000)
+        .take(*group_sizes.last().unwrap())
         .collect();
     let all_member_ciphertexts: Vec<_> = all_members
         .iter()
@@ -307,7 +300,7 @@ pub fn benchmark_group_send_endorsements(c: &mut Criterion) {
         .collect();
 
     let mut benchmark_group = c.benchmark_group("group_send_endorsements");
-    for group_size in [2, 5, 10, 100, 1000] {
+    for &group_size in group_sizes {
         let group = &all_members[..group_size];
         let group_ciphertexts = &all_member_ciphertexts[..group_size];
 

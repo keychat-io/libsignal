@@ -1,4 +1,4 @@
-name: Upload Java libraries to Sonatype
+name: "Release - Java"
 run-name: ${{ github.workflow }} (${{ github.ref_name }})
 
 on:
@@ -21,13 +21,11 @@ jobs:
 
     strategy:
       matrix:
-        os: [windows-latest, macos-12]
+        os: [windows-latest-8-cores, macos-15-xlarge]
         include:
-          - os: windows-latest
-            library: signal_jni.dll
-          - os: macos-12
-            library: libsignal_jni.dylib
-            additional-rust-target: aarch64-apple-darwin
+          - os: windows-latest-8-cores
+          - os: macos-15-xlarge
+            additional-rust-target: x86_64-apple-darwin
         # Ubuntu binaries are built using Docker, below
 
     timeout-minutes: 45
@@ -51,9 +49,9 @@ jobs:
             core.setFailed("the action should either be launched on a tag or with a 'dry run' switch");
           }
 
-    - run: rustup toolchain install $(cat rust-toolchain) --profile minimal
+    - run: rustup toolchain install "$(cat rust-toolchain)" --profile minimal
 
-    - run: rustup target add ${{ matrix.additional-rust-target }}
+    - run: rustup target add "${{ matrix.additional-rust-target }}"
       if: ${{ matrix.additional-rust-target != '' }}
 
     # install nasm compiler for boring
@@ -63,32 +61,46 @@ jobs:
       shell: cmd
 
     - run: choco install protoc
-      if: matrix.os == 'windows-latest'
+      if: startsWith(matrix.os, 'windows-')
 
     - run: brew install protobuf
-      if: matrix.os == 'macos-12'
+      if: startsWith(matrix.os, 'macos-')
 
-    - name: Build for host (should be x86_64)
+    - name: Build client for host
       run: java/build_jni.sh desktop
       shell: bash
 
-    - name: Build for alternate target (arm64)
+    - name: Build server for host
+      run: java/build_jni.sh server
+      shell: bash
+
+    - name: Build client for alternate target
       run: java/build_jni.sh desktop
-      if: matrix.os == 'macos-12'
+      if: startsWith(matrix.os, 'macos-')
       env:
         CARGO_BUILD_TARGET: ${{ matrix.additional-rust-target }}
 
-    - name: Merge library slices (for macOS)
-      # Using target/release/ for both the input and output wouldn't normally be ideal
-      # from a build system perspective, but we're going to immediately upload the merged library.
-      run: lipo -create target/release/${{ matrix.library }} target/${{ matrix.additional-rust-target }}/release/${{ matrix.library }} -output target/release/${{ matrix.library }}
-      if: matrix.os == 'macos-12'
+    - name: Build server for alternate target
+      run: java/build_jni.sh server
+      if: startsWith(matrix.os, 'macos-')
+      env:
+        CARGO_BUILD_TARGET: ${{ matrix.additional-rust-target }}
 
-    - name: Upload library
+    - name: Upload client libraries
       uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
       with:
-        name: libsignal_jni (${{matrix.os}})
-        path: target/release/${{ matrix.library }}
+        name: libsignal-client libraries (${{matrix.os}})
+        path: |
+          java/client/src/main/resources/*.dll
+          java/client/src/main/resources/*.dylib
+
+    - name: Upload server libraries
+      uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+      with:
+        name: libsignal-server libraries (${{matrix.os}})
+        path: |
+          java/server/src/main/resources/*.dll
+          java/server/src/main/resources/*.dylib
 
   verify-rust:
     name: Verify JNI bindings
@@ -101,9 +113,11 @@ jobs:
       with:
         submodules: recursive
 
-    - run: rustup toolchain install $(cat rust-toolchain) --profile minimal
+    - run: rustup toolchain install "$(cat rust-toolchain)" --profile minimal
 
     - run: sudo apt-get update && sudo apt-get install protobuf-compiler
+
+    - run: cargo +stable install --version "$(cat .cbindgen-version)" --locked cbindgen
 
     - name: Verify that the JNI bindings are up to date
       run: rust/bridge/jni/bin/gen_java_decl.py --verify
@@ -111,7 +125,12 @@ jobs:
   publish:
     name: Build for production and publish
 
-    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Needed for google-github-actions/auth.
+      id-token: write
+
+    runs-on: ubuntu-latest-8-cores
 
     needs: [build, verify-rust]
 
@@ -122,14 +141,19 @@ jobs:
       with:
         submodules: recursive
 
-    - name: Download built libraries
-      id: download
+    - name: Download built client libraries
       uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427 # v4.1.4
       with:
-        path: artifacts
+        path: java/client/src/main/resources
+        pattern: libsignal-client*
+        merge-multiple: true
 
-    - name: Copy libraries
-      run: mv ${{ steps.download.outputs.download-path }}/*/* java/shared/resources && find java/shared/resources
+    - name: Download built server libraries
+      uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427 # v4.1.4
+      with:
+        path: java/server/src/main/resources
+        pattern: libsignal-server*
+        merge-multiple: true
 
     - run: make
       if: ${{ inputs.dry_run }}
@@ -156,12 +180,19 @@ jobs:
         name: libsignal-server
         path: java/server/build/libs/libsignal-server-*.jar
 
+    - id: gcp-auth
+      uses: google-github-actions/auth@55bd3a7c6e2ae7cf1877fd1ccb9d54c0503c457c # v2.1.2
+      if: ${{ !inputs.dry_run }}
+      with:
+        workload_identity_provider: 'projects/741367068918/locations/global/workloadIdentityPools/github/providers/github-actions'
+        service_account: 'github-actions@signal-build-artifacts.iam.gserviceaccount.com'
+        token_format: 'access_token'
+
     - run: make publish_java
       if: ${{ !inputs.dry_run }}
       working-directory: java
       env:
-        ORG_GRADLE_PROJECT_sonatypeUsername: ${{ secrets.SONATYPE_USER }}
-        ORG_GRADLE_PROJECT_sonatypePassword: ${{ secrets.SONATYPE_PASSWORD }}
+        CLOUDSDK_AUTH_ACCESS_TOKEN: ${{ steps.gcp-auth.outputs.access_token }}
         ORG_GRADLE_PROJECT_signingKeyId: ${{ secrets.SIGNING_KEYID }}
         ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.SIGNING_PASSWORD }}
         # ASCII-armored PGP secret key

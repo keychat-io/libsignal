@@ -6,16 +6,15 @@
 use hmac::Mac;
 use prost::Message;
 use rand::{CryptoRng, Rng};
-use subtle::ConstantTimeEq;
-
 use signal_crypto::{aes_256_cbc_decrypt, aes_256_cbc_encrypt};
+use subtle::ConstantTimeEq;
 
 use crate::constants::{
     USERNAME_LINK_ENTROPY_SIZE, USERNAME_LINK_HMAC_LEN, USERNAME_LINK_IV_SIZE,
     USERNAME_LINK_KEY_SIZE, USERNAME_LINK_LABEL_AUTHENTICATION_KEY,
     USERNAME_LINK_LABEL_ENCRYPTION_KEY,
 };
-use crate::{proto, UsernameLinkError};
+use crate::{UsernameLinkError, proto};
 
 /// Generates the encrypted buffer used for a username link, decryptable by [`decrypt_username`].
 ///
@@ -64,16 +63,17 @@ pub fn decrypt_username(
     }
 
     let mac_key = hkdf(entropy, USERNAME_LINK_LABEL_AUTHENTICATION_KEY);
-    let (iv_and_ctext, expected_hash) = encrypted_username.split_at(len - USERNAME_LINK_HMAC_LEN);
+    let (iv_and_ctext, expected_hash) = encrypted_username
+        .split_last_chunk::<USERNAME_LINK_HMAC_LEN>()
+        .expect("length already checked");
     let actual_hash = hmac(&mac_key, iv_and_ctext);
 
     if !bool::from(expected_hash.ct_eq(&actual_hash)) {
         return Err(UsernameLinkError::HmacMismatch);
     }
 
-    let ctext = &encrypted_username[USERNAME_LINK_IV_SIZE..len - USERNAME_LINK_HMAC_LEN];
+    let (iv, ctext) = iv_and_ctext.split_at(USERNAME_LINK_IV_SIZE);
     let aes_key = hkdf(entropy, USERNAME_LINK_LABEL_ENCRYPTION_KEY);
-    let iv = &encrypted_username[..USERNAME_LINK_IV_SIZE];
     let ptext =
         aes_256_cbc_decrypt(ctext, &aes_key, iv).map_err(|_| UsernameLinkError::BadCiphertext)?;
 
@@ -107,17 +107,17 @@ fn random_bytes<const SIZE: usize, R: Rng + CryptoRng>(rng: &mut R) -> [u8; SIZE
 
 #[cfg(test)]
 mod test {
+    use rand::TryRngCore as _;
     use rand::rngs::OsRng;
 
-    use crate::constants::{DISCRIMINATOR_RANGES, MAX_NICKNAME_LENGTH};
-
     use super::*;
+    use crate::constants::{DISCRIMINATOR_RANGES, MAX_NICKNAME_LENGTH};
 
     const TEST_CTEXT_SIZE: usize = 32;
 
     #[test]
     fn input_data_too_long() {
-        let mut csprng = OsRng;
+        let mut csprng = OsRng.unwrap_err();
         let long_username = "\
             abcdefghijklmnopqrstuvwxyz\
             abcdefghijklmnopqrstuvwxyz\
@@ -200,7 +200,7 @@ mod test {
     #[test]
     fn happy_case() {
         let expected_username = "test_username.42";
-        let mut csprng = OsRng;
+        let mut csprng = OsRng.unwrap_err();
         let (entropy, encrypted_username) =
             create_for_username(&mut csprng, expected_username.into(), None).expect("no error");
         let actual_username = decrypt_username(&entropy, &encrypted_username).expect("no error");
@@ -214,7 +214,7 @@ mod test {
             ["a"; MAX_NICKNAME_LENGTH].join(""),
             DISCRIMINATOR_RANGES.last().expect("non-empty").end - 1
         );
-        let mut csprng = OsRng;
+        let mut csprng = OsRng.unwrap_err();
         let (entropy, encrypted_username) =
             create_for_username(&mut csprng, expected_username.clone(), None).expect("no error");
         let actual_username = decrypt_username(&entropy, &encrypted_username).expect("no error");
@@ -224,7 +224,7 @@ mod test {
     #[test]
     fn reuse_entropy() {
         let expected_username = "test_username.42";
-        let mut csprng = OsRng;
+        let mut csprng = OsRng.unwrap_err();
         let (entropy, encrypted_username) =
             create_for_username(&mut csprng, expected_username.into(), None).expect("no error");
         let actual_username = decrypt_username(&entropy, &encrypted_username).expect("no error");
@@ -244,7 +244,7 @@ mod test {
     fn prost_ignores_unknown_fields_and_handles_missing_ones() {
         // Field # 0b1111111_1111 (way higher than anything we'd use) with a type of VARINT (0) and a value of 0
         // See https://protobuf.dev/programming-guides/encoding/
-        #[allow(clippy::unusual_byte_groupings)]
+        #[expect(clippy::unusual_byte_groupings)]
         let not_an_encoded_username_proto = [0b1_1111_000, 0b0_1111111, 0];
         let username_message =
             proto::username::UsernameData::decode(not_an_encoded_username_proto.as_slice())

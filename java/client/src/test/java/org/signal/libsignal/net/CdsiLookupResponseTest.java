@@ -15,8 +15,9 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import org.junit.Test;
 import org.signal.libsignal.attest.AttestationDataException;
-import org.signal.libsignal.internal.Native;
 import org.signal.libsignal.internal.NativeHandleGuard;
+import org.signal.libsignal.internal.NativeTesting;
+import org.signal.libsignal.internal.TokioAsyncContext;
 import org.signal.libsignal.protocol.ServiceId;
 
 public class CdsiLookupResponseTest {
@@ -45,7 +46,7 @@ public class CdsiLookupResponseTest {
     Future<Object> response;
 
     try (NativeHandleGuard guard = new NativeHandleGuard(context)) {
-      response = Native.TESTING_CdsiLookupResponseConvert(guard.nativeHandle());
+      response = NativeTesting.TESTING_CdsiLookupResponseConvert(guard.nativeHandle());
     }
 
     CdsiLookupResponse actual = (CdsiLookupResponse) response.get();
@@ -57,13 +58,11 @@ public class CdsiLookupResponseTest {
     assertLookupErrorIs(
         "Protocol", CdsiProtocolException.class, "Protocol error after establishing a connection");
     assertLookupErrorIs(
+        "CdsiProtocol", CdsiProtocolException.class, "CDS protocol: no token found in response");
+    assertLookupErrorIs(
         "AttestationDataError",
         AttestationDataException.class,
         "attestation data invalid: fake reason");
-    assertLookupErrorIs(
-        "InvalidResponse",
-        CdsiProtocolException.class,
-        "Invalid response received from the server");
     RetryLaterException retryLater =
         assertLookupErrorIs(
             "RetryAfter42Seconds", RetryLaterException.class, "Retry after 42 seconds");
@@ -72,15 +71,17 @@ public class CdsiLookupResponseTest {
     assertLookupErrorIs(
         "InvalidToken", CdsiInvalidTokenException.class, "Request token was invalid");
     assertLookupErrorIs(
-        "InvalidArgument",
-        IllegalArgumentException.class,
-        "invalid argument: request was invalid: fake reason");
+        "InvalidArgument", IllegalArgumentException.class, "request was invalid: fake reason");
     assertLookupErrorIs(
-        "Parse", CdsiProtocolException.class, "Failed to parse the response from the server");
-    assertLookupErrorIs("ConnectDnsFailed", IOException.class, "DNS lookup failed");
+        "TcpConnectFailed",
+        IOException.class,
+        "Failed to establish TCP connection to any of the IPs");
     assertLookupErrorIs(
         "WebSocketIdleTooLong", NetworkException.class, "channel was idle for too long");
-    assertLookupErrorIs("ConnectionTimedOut", NetworkException.class, "connect timed out");
+    assertLookupErrorIs(
+        "AllConnectionAttemptsFailed",
+        NetworkException.class,
+        "no connection attempts succeeded before timeout");
     assertLookupErrorIs("ServerCrashed", CdsiProtocolException.class, "Server error: crashed");
   }
 
@@ -90,8 +91,8 @@ public class CdsiLookupResponseTest {
         assertThrows(
             "for " + errorDescription,
             expectedErrorType,
-            () -> Native.TESTING_CdsiLookupErrorConvert(errorDescription));
-    assertEquals(e.getMessage(), expectedMessage);
+            () -> NativeTesting.TESTING_CdsiLookupErrorConvert(errorDescription));
+    assertEquals(expectedMessage, e.getMessage());
     return e;
   }
 }

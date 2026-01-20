@@ -5,18 +5,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use crate::args::*;
-use crate::errors::*;
-use crate::proof::*;
-use crate::scalar::*;
-use crate::shoapi::ShoApi;
-use crate::shohmacsha256::ShoHmacSha256;
-use crate::simple_types::*;
-use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
-use curve25519_dalek::ristretto::RistrettoPoint;
-use curve25519_dalek::scalar::Scalar;
-use curve25519_dalek::traits::MultiscalarMul;
-
 // POKSHO implements the "Sigma protocol for arbitrary linear relations" described in section
 // 19.5.3 of https://crypto.stanford.edu/~dabo/cryptobook/BonehShoup_0_4.pdf
 //
@@ -97,8 +85,18 @@ use curve25519_dalek::traits::MultiscalarMul;
 //  ---
 //  for index=0..total number of scalars:
 //   RistrettoScalar
-
 use PokshoError::*;
+use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+use curve25519_dalek::ristretto::RistrettoPoint;
+use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::traits::MultiscalarMul;
+
+use crate::args::*;
+use crate::errors::*;
+use crate::proof::*;
+use crate::shoapi::{ShoApi, ShoApiExt as _};
+use crate::shohmacsha256::ShoHmacSha256;
+use crate::simple_types::*;
 
 type ScalarIndex = u8;
 type PointIndex = u8;
@@ -206,12 +204,14 @@ impl Statement {
         sho2.absorb_and_ratchet(message); // M
         let blinding_scalar_bytes = sho2.squeeze_and_ratchet(g1.len() * 64);
 
-        let mut nonce = self.g1_new();
-        for i in 0..g1.len() {
-            nonce.push(scalar_from_slice_wide(
-                &blinding_scalar_bytes[i * 64..(i + 1) * 64],
-            ))
-        }
+        // TODO: use as_chunks once we reach MSRV 1.88.
+        let nonce: G1 = blinding_scalar_bytes
+            .chunks_exact(64)
+            .map(|chunk| {
+                let chunk = chunk.try_into().expect("correct width");
+                Scalar::from_bytes_mod_order_wide(chunk)
+            })
+            .collect();
 
         // Commitment from nonce by applying homomorphism F: commitment = F(nonce)
         let commitment = self.homomorphism_with_subtraction(&nonce, &all_points, None);
@@ -221,13 +221,14 @@ impl Statement {
             sho.absorb(&point.compress().to_bytes());
         }
         sho.absorb_and_ratchet(message);
-        let challenge = scalar_from_slice_wide(&sho.squeeze_and_ratchet(64));
+        let challenge = Scalar::from_bytes_mod_order_wide(&sho.squeeze_and_ratchet_as_array());
 
         // Response
-        let mut response = self.g1_new();
-        for i in 0..g1.len() {
-            response.push(nonce[i] + (g1[i] * challenge));
-        }
+        let response = nonce
+            .into_iter()
+            .zip(g1)
+            .map(|(nonce, g1)| nonce + (g1 * challenge))
+            .collect();
 
         let proof = Proof {
             challenge,
@@ -282,7 +283,7 @@ impl Statement {
             sho.absorb(&point.compress().to_bytes());
         }
         sho.absorb_and_ratchet(message); // M
-        let challenge = scalar_from_slice_wide(&sho.squeeze_and_ratchet(64));
+        let challenge = Scalar::from_bytes_mod_order_wide(&sho.squeeze_and_ratchet_as_array());
 
         // Check challenge (const time)
         if challenge == proof.challenge {
@@ -301,11 +302,9 @@ impl Statement {
             Some(index) => Ok(*index),
             None => {
                 assert!(self.scalar_map.len() == self.scalar_vec.len());
-                let new_index = self.scalar_map.len();
-                if new_index > 255 {
+                let Ok(new_index) = self.scalar_map.len().try_into() else {
                     return Err(BadArgs);
-                }
-                let new_index = new_index as u8;
+                };
                 self.scalar_map.insert(scalar_name.clone(), new_index);
                 self.scalar_vec.push(scalar_name.clone());
                 Ok(new_index)
@@ -322,11 +321,9 @@ impl Statement {
             Some(index) => Ok(*index),
             None => {
                 assert!(self.point_map.len() == self.point_vec.len());
-                let new_index = self.point_map.len();
-                if new_index > 255 {
+                let Ok(new_index) = self.point_map.len().try_into() else {
                     return Err(BadArgs);
-                }
-                let new_index = new_index as u8;
+                };
                 self.point_map.insert(point_name.clone(), new_index);
                 self.point_vec.push(point_name.clone());
                 Ok(new_index)
@@ -335,33 +332,26 @@ impl Statement {
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        assert!(
-            self.equations.len() <= 255
-                && self.scalar_map.len() <= 256
-                && self.point_map.len() <= 256
-        );
-        let mut v = vec![self.equations.len() as u8];
+        let equation_count =
+            u8::try_from(self.equations.len()).expect("number of equations fits in a byte");
+        let scalar_count =
+            u8::try_from(self.scalar_map.len()).expect("number of scalars fits in a byte");
+        let point_count =
+            u8::try_from(self.point_map.len()).expect("number of points fits in a byte");
+        let mut v = vec![equation_count];
         for Equation { lhs, rhs } in &self.equations {
-            assert!(*lhs as usize <= self.point_map.len());
-            assert!(rhs.len() <= 255);
+            assert!(*lhs <= point_count);
             v.push(*lhs);
-            v.push(rhs.len() as u8);
+            let term_count = u8::try_from(rhs.len()).expect("number of terms fits in a byte");
+            v.push(term_count);
             for Term { scalar, point } in rhs {
-                assert!((*scalar as usize) < self.scalar_map.len());
-                assert!((*point as usize) < self.point_map.len());
+                assert!(*scalar < scalar_count);
+                assert!(*point < point_count);
                 v.push(*scalar);
                 v.push(*point);
             }
         }
         v
-    }
-
-    fn g1_new(&self) -> G1 {
-        G1::with_capacity(self.scalar_vec.len())
-    }
-
-    fn g2_new(&self) -> G2 {
-        G2::with_capacity(self.equations.len())
     }
 
     // Applies the homomorphism from G1 -> G2
@@ -373,60 +363,64 @@ impl Statement {
         all_points: &[RistrettoPoint],
         challenge: Option<Scalar>,
     ) -> G2 {
-        let mut g2 = self.g2_new();
-        for e in &self.equations {
-            let scalar_iter = e
-                .rhs
-                .iter()
-                .map(|Term { scalar, point: _ }| g1[*scalar as usize]);
-            let point_iter = e
-                .rhs
-                .iter()
-                .map(|Term { scalar: _, point }| all_points[*point as usize]);
+        self.equations
+            .iter()
+            .map(|e| {
+                let scalar_iter = e
+                    .rhs
+                    .iter()
+                    .map(|Term { scalar, point: _ }| g1[*scalar as usize]);
+                let point_iter = e
+                    .rhs
+                    .iter()
+                    .map(|Term { scalar: _, point }| all_points[*point as usize]);
 
-            // Can this be done without a vector?
-            let mut v_scalar = Vec::<Scalar>::with_capacity(1);
-            let mut v_point = Vec::<RistrettoPoint>::with_capacity(1);
-            if let Some(h) = challenge {
-                v_scalar.push(-h);
-                v_point.push(all_points[e.lhs as usize]);
-            };
+                let (v_scalar, v_point) =
+                    challenge.map(|h| (-h, all_points[e.lhs as usize])).unzip();
 
-            let scalar_iter = scalar_iter.chain(v_scalar);
-            let point_iter = point_iter.chain(v_point);
+                let scalar_iter = scalar_iter.chain(v_scalar);
+                let point_iter = point_iter.chain(v_point);
 
-            // Could use vartime_multiscalar_mul in some cases, but in the
-            // general case points might be secret (not just scalars!)
-            g2.push(RistrettoPoint::multiscalar_mul(scalar_iter, point_iter));
-        }
-        g2
+                // Could use vartime_multiscalar_mul in some cases, but in the
+                // general case points might be secret (not just scalars!)
+                RistrettoPoint::multiscalar_mul(scalar_iter, point_iter)
+            })
+            .collect()
     }
 
     fn sort_scalars(&self, scalar_args: &ScalarArgs) -> Result<G1, PokshoError> {
         if scalar_args.0.len() != self.scalar_vec.len() {
             return Err(BadArgsWrongNumberOfScalarArgs);
         }
-        let mut g1 = self.g1_new();
-        for scalar_name in &self.scalar_vec {
-            g1.push(
-                *scalar_args
+
+        self.scalar_vec
+            .iter()
+            .map(|scalar_name| {
+                scalar_args
                     .0
                     .get(scalar_name)
-                    .ok_or(BadArgsMissingScalarArg)?,
-            );
-        }
-        Ok(g1)
+                    .copied()
+                    .ok_or(BadArgsMissingScalarArg)
+            })
+            .collect()
     }
 
     fn sort_points(&self, point_args: &PointArgs) -> Result<Vec<RistrettoPoint>, PokshoError> {
         if point_args.0.len() != self.point_vec.len() - 1 {
             return Err(BadArgsWrongNumberOfPointArgs);
         }
-        let mut all_points = vec![RISTRETTO_BASEPOINT_POINT];
-        for point_name in &self.point_vec[1..] {
-            all_points.push(*point_args.0.get(point_name).ok_or(BadArgsMissingPointArg)?);
-        }
-        Ok(all_points)
+        let try_iter_points = self.point_vec[1..].iter().map(|point_name| {
+            point_args
+                .0
+                .get(point_name)
+                .copied()
+                .ok_or(BadArgsMissingPointArg)
+        });
+
+        [Ok(RISTRETTO_BASEPOINT_POINT)]
+            .into_iter()
+            .chain(try_iter_points)
+            .collect()
     }
 }
 
@@ -460,6 +454,7 @@ mod tests {
 
     #[test]
     #[allow(
+        clippy::cast_possible_truncation,
         clippy::needless_range_loop,
         clippy::redundant_clone,
         clippy::unwrap_used

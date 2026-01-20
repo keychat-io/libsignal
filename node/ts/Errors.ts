@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import { ProtocolAddress } from './Address';
-import * as Native from '../Native';
+import { ProtocolAddress, ServiceId } from './Address.js';
+import * as Native from './Native.js';
 
 export enum ErrorCode {
   Generic,
@@ -13,6 +13,7 @@ export enum ErrorCode {
   SealedSenderSelfSend,
   UntrustedIdentity,
   InvalidRegistrationId,
+  InvalidProtocolAddress,
   VerificationFailed,
   InvalidSession,
   InvalidSenderKeySession,
@@ -42,16 +43,72 @@ export enum ErrorCode {
   InvalidUsernameLinkEncryptedData,
 
   RateLimitedError,
+  RateLimitChallengeError,
 
   SvrDataMissing,
   SvrRequestFailed,
   SvrRestoreFailed,
+  SvrAttestationError,
+  SvrInvalidData,
 
   ChatServiceInactive,
   AppExpired,
   DeviceDelinked,
+  ConnectionInvalidated,
+  ConnectedElsewhere,
+  PossibleCaptiveNetwork,
+
+  BackupValidation,
 
   Cancelled,
+
+  KeyTransparencyError,
+  KeyTransparencyVerificationFailed,
+
+  IncrementalMacVerificationFailed,
+
+  RequestUnauthorized,
+  MismatchedDevices,
+}
+
+/** Called out as a separate type so it's not confused with a normal ServiceIdBinary. */
+type ServiceIdFixedWidthBinary = Uint8Array;
+
+/**
+ * A failure sending to a recipient on account of not being up to date on their devices.
+ *
+ * An entry in {@link MismatchedDevicesError}. Each entry represents a recipient that has either
+ * added, removed, or relinked some devices in their account (potentially including their primary
+ * device), as represented by the {@link MismatchedDevicesEntry#missingDevices},
+ * {@link MismatchedDevicesEntry#extraDevices}, and {@link MismatchedDevicesEntry#staleDevices}
+ * arrays, respectively. Handling the exception involves removing the "extra" devices and
+ * establishing new sessions for the "missing" and "stale" devices.
+ */
+export class MismatchedDevicesEntry {
+  account: ServiceId;
+  missingDevices: number[];
+  extraDevices: number[];
+  staleDevices: number[];
+
+  constructor({
+    account,
+    missingDevices,
+    extraDevices,
+    staleDevices,
+  }: {
+    account: ServiceId | ServiceIdFixedWidthBinary;
+    missingDevices?: number[];
+    extraDevices?: number[];
+    staleDevices?: number[];
+  }) {
+    this.account =
+      account instanceof ServiceId
+        ? account
+        : ServiceId.parseFromServiceIdFixedWidthBinary(account);
+    this.missingDevices = missingDevices ?? [];
+    this.extraDevices = extraDevices ?? [];
+    this.staleDevices = staleDevices ?? [];
+  }
 }
 
 export class LibSignalErrorBase extends Error {
@@ -98,6 +155,29 @@ export class LibSignalErrorBase extends Error {
         throw new TypeError(`cannot get address from this error (${this})`);
     }
   }
+
+  public toString(): string {
+    return `${this.name} - ${this.operation}: ${this.message}`;
+  }
+
+  /// Like `error.code === code`, but also providing access to any additional properties.
+  public is<E extends ErrorCode>(
+    code: E
+  ): this is Extract<LibSignalError, { code: E }> {
+    return this.code === code;
+  }
+
+  /// Like `error instanceof LibSignalErrorBase && error.code === code`, but all in one expression,
+  /// and providing access to any additional properties.
+  public static is<E extends ErrorCode>(
+    error: unknown,
+    code: E
+  ): error is Extract<LibSignalError, { code: E }> {
+    if (error instanceof LibSignalErrorBase) {
+      return error.is(code);
+    }
+    return false;
+  }
 }
 
 export type LibSignalErrorCommon = Omit<LibSignalErrorBase, 'addr'>;
@@ -122,6 +202,12 @@ export type UntrustedIdentityError = LibSignalErrorCommon & {
 export type InvalidRegistrationIdError = LibSignalErrorCommon & {
   code: ErrorCode.InvalidRegistrationId;
   addr: ProtocolAddress;
+};
+
+export type InvalidProtocolAddress = LibSignalErrorCommon & {
+  code: ErrorCode.InvalidProtocolAddress;
+  name: string;
+  deviceId: number;
 };
 
 export type VerificationFailedError = LibSignalErrorCommon & {
@@ -215,6 +301,12 @@ export type RateLimitedError = LibSignalErrorBase & {
   readonly retryAfterSecs: number;
 };
 
+export type RateLimitChallengeError = LibSignalErrorBase & {
+  code: ErrorCode.RateLimitChallengeError;
+  readonly token: string;
+  readonly options: Set<'pushChallenge' | 'captcha'>;
+};
+
 export type ChatServiceInactive = LibSignalErrorBase & {
   code: ErrorCode.ChatServiceInactive;
 };
@@ -225,6 +317,18 @@ export type AppExpiredError = LibSignalErrorBase & {
 
 export type DeviceDelinkedError = LibSignalErrorBase & {
   code: ErrorCode.DeviceDelinked;
+};
+
+export type ConnectionInvalidatedError = LibSignalErrorBase & {
+  code: ErrorCode.ConnectionInvalidated;
+};
+
+export type ConnectedElsewhereError = LibSignalErrorBase & {
+  code: ErrorCode.ConnectedElsewhere;
+};
+
+export type PossibleCaptiveNetworkError = LibSignalErrorBase & {
+  code: ErrorCode.PossibleCaptiveNetwork;
 };
 
 export type SvrDataMissingError = LibSignalErrorBase & {
@@ -240,8 +344,42 @@ export type SvrRestoreFailedError = LibSignalErrorCommon & {
   readonly triesRemaining: number;
 };
 
+export type SvrAttestationError = LibSignalErrorCommon & {
+  code: ErrorCode.SvrAttestationError;
+};
+
+export type SvrInvalidDataError = LibSignalErrorCommon & {
+  code: ErrorCode.SvrInvalidData;
+};
+
+export type BackupValidationError = LibSignalErrorCommon & {
+  code: ErrorCode.BackupValidation;
+  readonly unknownFields: ReadonlyArray<string>;
+};
+
 export type CancellationError = LibSignalErrorCommon & {
   code: ErrorCode.Cancelled;
+};
+
+export type KeyTransparencyError = LibSignalErrorCommon & {
+  code: ErrorCode.KeyTransparencyError;
+};
+
+export type KeyTransparencyVerificationFailed = LibSignalErrorCommon & {
+  code: ErrorCode.KeyTransparencyVerificationFailed;
+};
+
+export type IncrementalMacVerificationFailed = LibSignalErrorCommon & {
+  code: ErrorCode.IncrementalMacVerificationFailed;
+};
+
+export type RequestUnauthorizedError = LibSignalErrorCommon & {
+  code: ErrorCode.RequestUnauthorized;
+};
+
+export type MismatchedDevicesError = LibSignalErrorCommon & {
+  code: ErrorCode.MismatchedDevices;
+  readonly entries: MismatchedDevicesEntry[];
 };
 
 export type LibSignalError =
@@ -250,6 +388,7 @@ export type LibSignalError =
   | SealedSenderSelfSendError
   | UntrustedIdentityError
   | InvalidRegistrationIdError
+  | InvalidProtocolAddress
   | VerificationFailedError
   | InvalidSessionError
   | InvalidSenderKeySessionError
@@ -275,8 +414,21 @@ export type LibSignalError =
   | SvrDataMissingError
   | SvrRestoreFailedError
   | SvrRequestFailedError
+  | SvrAttestationError
+  | SvrInvalidDataError
   | UnsupportedMediaInputError
   | ChatServiceInactive
   | AppExpiredError
   | DeviceDelinkedError
-  | CancellationError;
+  | ConnectionInvalidatedError
+  | ConnectedElsewhereError
+  | PossibleCaptiveNetworkError
+  | RateLimitedError
+  | RateLimitChallengeError
+  | BackupValidationError
+  | CancellationError
+  | KeyTransparencyError
+  | KeyTransparencyVerificationFailed
+  | IncrementalMacVerificationFailed
+  | RequestUnauthorizedError
+  | MismatchedDevicesError;

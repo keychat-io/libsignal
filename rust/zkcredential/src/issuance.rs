@@ -18,15 +18,16 @@ pub mod blind;
 use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::traits::Identity;
 use partial_default::PartialDefault;
+use poksho::shoapi::ShoApiExt as _;
 use poksho::{ShoApi, ShoHmacSha256};
 use serde::{Deserialize, Serialize};
 
 use crate::attributes::{Attribute, PublicAttribute};
 use crate::credentials::{
-    Credential, CredentialKeyPair, CredentialPublicKey, SystemParams, NUM_SUPPORTED_ATTRS,
+    Credential, CredentialKeyPair, CredentialPublicKey, NUM_SUPPORTED_ATTRS, SystemParams,
 };
 use crate::sho::ShoExt;
-use crate::{VerificationFailure, RANDOMNESS_LEN};
+use crate::{RANDOMNESS_LEN, VerificationFailure};
 
 /// Contains a [`Credential`] along with a proof of its validity.
 ///
@@ -249,9 +250,9 @@ impl<'a> IssuanceProofBuilder<'a> {
                 &scalar_args,
                 &point_args,
                 self.authenticated_message,
-                &sho.squeeze_and_ratchet(RANDOMNESS_LEN)[..],
+                &sho.squeeze_and_ratchet_as_array::<RANDOMNESS_LEN>(),
             )
-            .unwrap();
+            .expect("valid proof");
         IssuanceProof {
             poksho_proof,
             credential,
@@ -264,6 +265,9 @@ impl<'a> IssuanceProofBuilder<'a> {
     pub fn verify(
         mut self,
         public_key: &CredentialPublicKey,
+        // Even though it would work with a borrow, this deliberately consumes
+        // IssuanceProof to indicate that you should not keep it around after
+        // you have extracted the credential.
         proof: IssuanceProof,
     ) -> Result<Credential, VerificationFailure> {
         self.finalize_public_attrs();

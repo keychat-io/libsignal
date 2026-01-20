@@ -23,13 +23,17 @@ prefix_with_name = true
 
 [export]
 include = [
-    "SignalErrorCode",
+    "ChallengeOption",
     "FfiDirection",
     "FfiCiphertextMessageType",
     "FfiContentHint",
+    "IdentityChange",
     "RandomnessBytes",
+    "SignalErrorCode",
+    "Svr2CredentialsResult",
+    "UnidentifiedAccessKey",
 ]
-exclude = ["TAG_SIZE", "NONCE_SIZE"]
+exclude = ["TAG_SIZE", "NONCE_SIZE", "VERSION"]
 item_types = [
     "enums",
     "functions",
@@ -62,7 +66,6 @@ renaming_overrides_prefixing = true
 "OwnedBufferOfc_uchar" = "SignalOwnedBuffer"
 "OwnedBufferOfFfiLookupResponseEntry" = "SignalOwnedLookupResponseEntryList"
 "FfiOptionalServiceIdFixedWidthBinaryBytes" = "SignalOptionalServiceIdFixedWidthBinaryBytes"
-"CPromisec_void" = "SignalCPromiseRawPointer"
 
 "RawCancellationId" = "SignalCancellationId"
 
@@ -75,28 +78,30 @@ renaming_overrides_prefixing = true
 remove_underscores = true
 
 [fn]
-sort_by = "None"
+sort_by = "Name"
 args = "horizontal"
 
 [parse]
 parse_deps = true
 include = [
+    "libsignal-account-keys",
+    "libsignal-bridge-types",
     "libsignal-core",
+    "libsignal-net",
+    "libsignal-net-chat",
     "libsignal-protocol",
-    "signal-crypto",
-    "signal-pin",
-    "zkgroup",
-    "signal-media",
     "mediasan-common",
-    "mp4san",
-    "webpsan",
+    "signal-crypto",
+    "signal-media",
+    "zkgroup",
 ]
-extra_bindings = ["libsignal-bridge", "zkgroup"]
+extra_bindings = [
+    "libsignal-account-keys",
+    "libsignal-bridge",
+    "libsignal-bridge-types",
+    "zkgroup",
+]
 
 [parse.expand]
-crates = ["libsignal-ffi", "libsignal-bridge"]
-features = [
-    "libsignal-bridge/ffi",
-    "libsignal-bridge/signal-media",
-    "libsignal-bridge/testing-fns",
-]
+crates = ["libsignal-ffi", "libsignal-bridge", "libsignal-bridge-types"]
+features = ["ffi", "signal-media"]

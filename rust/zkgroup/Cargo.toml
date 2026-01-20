@@ -6,46 +6,53 @@
 [package]
 name = "zkgroup"
 version = "0.9.0"
-authors = ["Signal Messenger LLC"]
-edition = "2021"
+authors.workspace = true
+license.workspace = true
+rust-version = "1.85"
+edition = "2024"
 description = "A zero-knowledge group library"
-license = "AGPL-3.0-only"
+
+[lints]
+workspace = true
 
 [dependencies]
-libsignal-core = { path = "../core" }
-poksho = { path = "../poksho" }
-signal-crypto = { path = "../crypto" }
-zkcredential = { path = "../zkcredential", features = ["rayon"] }
+libsignal-account-keys = { workspace = true, features = ["serde"] }
+libsignal-core = { workspace = true }
+poksho = { workspace = true }
+zkcredential = { workspace = true, features = ["rayon"] }
 
-curve25519-dalek = { git = 'https://github.com/signalapp/curve25519-dalek', tag = 'signal-curve25519-4.1.3', version = "4.1.1", features = ["serde"] }
+# Use our fork of curve25519-dalek for zkgroup support.
+curve25519-dalek-signal = { workspace = true, features = ["serde"] }
 
-aes-gcm-siv = "0.11.1"
-bincode = "1.2.1"
-derive-where = "1.2.5"
-displaydoc = "0.2"
-hex = "0.4.0"
-hex-literal = "0.4.1"
-hkdf = "0.12"
-lazy_static = "1.4.0"
-num_enum = "0.6.1"
-partial-default = { version = "0.1.0", features = ["derive"] }
-rand = "0.8"
-rayon = "1.8.0"
-serde = { version = "1.0.106", features = ["derive"] }
-sha2 = "0.10.0"
-subtle = "2.3"
-thiserror = "1.0.57"
-uuid = "1.1.2"
+aes = { workspace = true }
+aes-gcm-siv = { workspace = true }
+bincode = { workspace = true }
+const-str = { workspace = true }
+derive-where = { workspace = true }
+derive_more = { workspace = true, features = ["from", "try_from"] }
+displaydoc = { workspace = true }
+hex = { workspace = true }
+hkdf = { workspace = true }
+partial-default = { workspace = true, features = ["derive"] }
+rand = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
+static_assertions = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
 
 # For generation
-base64 = { version = "0.21", optional = true }
+base64 = { workspace = true, optional = true }
 
 [dev-dependencies]
-uuid = { version = "1", features = ["v5"] }
+assert_matches = { workspace = true }
+uuid = { workspace = true, features = ["v5"] }
 
 # For benchmarking
-criterion = "0.5"
-test-case = "3.3.1"
+criterion = { workspace = true }
+test-case = { workspace = true }
 
 [[bench]]
 name = "zkgroup_benchmarks"

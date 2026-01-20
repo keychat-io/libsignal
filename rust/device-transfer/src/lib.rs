@@ -6,7 +6,7 @@
 //! Support logic for Signal's device-to-device transfer feature.
 
 #![deny(unsafe_code)]
-#![warn(missing_docs)]
+#![warn(missing_docs, clippy::unwrap_used)]
 
 use std::fmt;
 use std::time::{Duration, SystemTime};
@@ -16,7 +16,7 @@ use boring::error::ErrorStack;
 use boring::hash::MessageDigest;
 use boring::pkey::{PKey, Private};
 use boring::rsa::Rsa;
-use boring::x509::{X509Builder, X509Name, X509NameBuilder, X509};
+use boring::x509::{X509, X509Builder, X509Name, X509NameBuilder};
 
 /// Error types for device transfer.
 #[derive(Copy, Clone, Debug)]
@@ -31,7 +31,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::KeyDecodingFailed => write!(f, "Decoding provided RSA private key failed"),
-            Error::InternalError(s) => write!(f, "Internal error in device transfer ({})", s),
+            Error::InternalError(s) => write!(f, "Internal error in device transfer ({s})"),
         }
     }
 }
@@ -56,8 +56,8 @@ impl From<u8> for KeyFormat {
 
 /// Generate a private key of size `bits` and export to a specified format.
 pub fn create_rsa_private_key(bits: usize, key_format: KeyFormat) -> Result<Vec<u8>, Error> {
-    let rsa = Rsa::generate(bits as u32)
-        .map_err(|_| Error::InternalError("RSA key generation failed"))?;
+    let bits = u32::try_from(bits).map_err(|_| Error::InternalError("invalid key size"))?;
+    let rsa = Rsa::generate(bits).map_err(|_| Error::InternalError("RSA key generation failed"))?;
     let key =
         PKey::from_rsa(rsa).map_err(|_| Error::InternalError("Private key generation failed"))?;
     private_key_to_der(key, key_format)

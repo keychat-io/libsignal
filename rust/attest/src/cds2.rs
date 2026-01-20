@@ -5,24 +5,12 @@
 
 use std::collections::HashMap;
 
-use crate::constants::ENCLAVE_ID_CDSI_STAGING_AND_PROD;
 use prost::Message;
 
 use crate::dcap;
-use crate::enclave::{Handshake, Result};
+use crate::enclave::{Handshake, HandshakeType, Result};
 use crate::proto::cds2;
-use crate::util::SmallMap;
-
-/// Map from MREnclave to intel SW advisories that are known to be mitigated in the
-/// build with that MREnclave value.
-const ACCEPTABLE_SW_ADVISORIES: &SmallMap<&[u8], &'static [&'static str], 1> = &SmallMap::new([(
-    ENCLAVE_ID_CDSI_STAGING_AND_PROD,
-    &["INTEL-SA-00615", "INTEL-SA-00657"] as &[&str],
-)]);
-
-/// SW advisories known to be mitigated by default. If an MREnclave is provided that
-/// is not contained in `ACCEPTABLE_SW_ADVISORIES`, this will be used
-const DEFAULT_SW_ADVISORIES: &[&str] = &[];
+use crate::util::get_sw_advisories;
 
 pub fn new_handshake(
     mrenclave: &[u8],
@@ -35,10 +23,9 @@ pub fn new_handshake(
         mrenclave,
         &handshake_start.evidence,
         &handshake_start.endorsement,
-        ACCEPTABLE_SW_ADVISORIES
-            .get(&mrenclave)
-            .unwrap_or(&DEFAULT_SW_ADVISORIES),
+        get_sw_advisories(mrenclave),
         current_time,
+        HandshakeType::PostQuantum,
     )?
     .skip_raft_validation())
 }
@@ -56,7 +43,7 @@ pub fn extract_metrics(attestation_msg: &[u8]) -> Result<HashMap<String, i64>> {
 mod test {
     use std::time::{Duration, SystemTime};
 
-    use hex_literal::hex;
+    use const_str::hex;
 
     use super::*;
 

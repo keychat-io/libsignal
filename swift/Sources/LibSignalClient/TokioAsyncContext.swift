@@ -6,24 +6,27 @@
 import Foundation
 import SignalFfi
 
-#if canImport(SignalCoreKit)
-import SignalCoreKit
-#endif
-
-internal class TokioAsyncContext: NativeHandleOwner {
+internal class TokioAsyncContext: NativeHandleOwner<SignalMutPointerTokioAsyncContext>, @unchecked Sendable {
     convenience init() {
-        var handle: OpaquePointer?
-        failOnError(signal_tokio_async_context_new(&handle))
-        self.init(owned: handle!)
+        let handle = failOnError {
+            try invokeFnReturningValueByPointer(.init()) {
+                signal_tokio_async_context_new($0)
+            }
+        }
+        self.init(owned: NonNull(handle)!)
     }
 
-    override internal class func destroyNativeHandle(_ handle: OpaquePointer) -> SignalFfiErrorRef? {
-        signal_tokio_async_context_destroy(handle)
+    override internal class func destroyNativeHandle(
+        _ handle: NonNull<SignalMutPointerTokioAsyncContext>
+    ) -> SignalFfiErrorRef? {
+        signal_tokio_async_context_destroy(handle.pointer)
     }
 
     /// A thread-safe helper for translating Swift task cancellations into calls to
     /// `signal_tokio_async_context_cancel`.
-    private class CancellationHandoffHelper {
+    private final class CancellationHandoffHelper: @unchecked Sendable {
+        // We'd like to remove the `@unchecked` above but Swift 5.10 still complains about
+        // 'state' being mutable despite `nonisolated(unsafe)`.
         enum State {
             case initial
             case started(SignalCancellationId)
@@ -32,8 +35,8 @@ internal class TokioAsyncContext: NativeHandleOwner {
 
         // Emulates Rust's `Mutex<State>` (and the containing class is providing an `Arc`)
         // Unfortunately, doing this in Swift requires a separate allocation for the lock today.
-        var state: State = .initial
-        var lock = NSLock()
+        nonisolated(unsafe) var state: State = .initial
+        let lock = NSLock()
 
         let context: TokioAsyncContext
 
@@ -87,14 +90,15 @@ internal class TokioAsyncContext: NativeHandleOwner {
         func cancel(_ id: SignalCancellationId) {
             do {
                 try self.context.withNativeHandle {
-                    try checkError(signal_tokio_async_context_cancel($0, id))
+                    try checkError(signal_tokio_async_context_cancel($0.const(), id))
                 }
             } catch {
-#if canImport(SignalCoreKit)
-                Logger.warn("failed to cancel libsignal task \(id): \(error)")
-#else
-                NSLog("failed to cancel libsignal task %ld: %@", id, "\(error)")
-#endif
+                LoggerBridge.shared?.logger.log(
+                    level: .warn,
+                    file: #fileID,
+                    line: #line,
+                    message: "failed to cancel libsignal task \(id): \(error)"
+                )
             }
         }
     }
@@ -109,19 +113,47 @@ internal class TokioAsyncContext: NativeHandleOwner {
     /// }
     /// ```
     internal func invokeAsyncFunction<Promise: PromiseStruct>(
-        _ body: (UnsafeMutablePointer<Promise>, OpaquePointer?) -> SignalFfiErrorRef?
+        _ body: (UnsafeMutablePointer<Promise>, SignalMutPointerTokioAsyncContext) -> SignalFfiErrorRef?
     ) async throws -> Promise.Result {
         let cancellationHelper = CancellationHandoffHelper(context: self)
-        return try await withTaskCancellationHandler(operation: {
-            try await LibSignalClient.invokeAsyncFunction({ promise in
-                withNativeHandle { handle in
-                    body(promise, handle)
-                }
-            }, saveCancellationId: {
-                cancellationHelper.setCancellationId($0)
-            })
-        }, onCancel: {
-            cancellationHelper.cancel()
-        })
+        return try await withTaskCancellationHandler(
+            operation: {
+                try await LibSignalClient.invokeAsyncFunction(
+                    { promise in
+                        withNativeHandle { handle in
+                            body(promise, handle)
+                        }
+                    },
+                    saveCancellationId: {
+                        cancellationHelper.setCancellationId($0)
+                    }
+                )
+            },
+            onCancel: {
+                cancellationHelper.cancel()
+            }
+        )
+    }
+}
+
+extension SignalMutPointerTokioAsyncContext: SignalMutPointer {
+    public typealias ConstPointer = SignalConstPointerTokioAsyncContext
+
+    public init(untyped: OpaquePointer?) {
+        self.init(raw: untyped)
+    }
+
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+
+    public func const() -> Self.ConstPointer {
+        Self.ConstPointer(raw: self.raw)
+    }
+}
+
+extension SignalConstPointerTokioAsyncContext: SignalConstPointer {
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
     }
 }

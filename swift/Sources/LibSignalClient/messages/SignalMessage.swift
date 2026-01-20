@@ -6,44 +6,47 @@
 import Foundation
 import SignalFfi
 
-public class SignalMessage: NativeHandleOwner {
-    override internal class func destroyNativeHandle(_ handle: OpaquePointer) -> SignalFfiErrorRef? {
-        return signal_message_destroy(handle)
+public class SignalMessage: NativeHandleOwner<SignalMutPointerSignalMessage> {
+    override internal class func destroyNativeHandle(
+        _ handle: NonNull<SignalMutPointerSignalMessage>
+    ) -> SignalFfiErrorRef? {
+        return signal_message_destroy(handle.pointer)
     }
 
     public convenience init<Bytes: ContiguousBytes>(bytes: Bytes) throws {
-        var result: OpaquePointer?
-        try bytes.withUnsafeBorrowedBuffer {
-            try checkError(signal_message_deserialize(&result, $0))
+        let result = try bytes.withUnsafeBorrowedBuffer { bytes in
+            try invokeFnReturningValueByPointer(.init()) {
+                signal_message_deserialize($0, bytes)
+            }
         }
-        self.init(owned: result!)
+        self.init(owned: NonNull(result)!)
     }
 
     public var senderRatchetKey: PublicKey {
         return withNativeHandle { nativeHandle in
             failOnError {
                 try invokeFnReturningNativeHandle {
-                    signal_message_get_sender_ratchet_key($0, nativeHandle)
+                    signal_message_get_sender_ratchet_key($0, nativeHandle.const())
                 }
             }
         }
     }
 
-    public var body: [UInt8] {
+    public var body: Data {
         return withNativeHandle { nativeHandle in
             failOnError {
-                try invokeFnReturningArray {
-                    signal_message_get_body($0, nativeHandle)
+                try invokeFnReturningData {
+                    signal_message_get_body($0, nativeHandle.const())
                 }
             }
         }
     }
 
-    public func serialize() -> [UInt8] {
+    public func serialize() -> Data {
         return withNativeHandle { nativeHandle in
             failOnError {
-                try invokeFnReturningArray {
-                    signal_message_get_serialized($0, nativeHandle)
+                try invokeFnReturningData {
+                    signal_message_get_serialized($0, nativeHandle.const())
                 }
             }
         }
@@ -53,7 +56,7 @@ public class SignalMessage: NativeHandleOwner {
         return withNativeHandle { nativeHandle in
             failOnError {
                 try invokeFnReturningInteger {
-                    signal_message_get_message_version($0, nativeHandle)
+                    signal_message_get_message_version($0, nativeHandle.const())
                 }
             }
         }
@@ -63,7 +66,7 @@ public class SignalMessage: NativeHandleOwner {
         return withNativeHandle { nativeHandle in
             failOnError {
                 try invokeFnReturningInteger {
-                    signal_message_get_counter($0, nativeHandle)
+                    signal_message_get_counter($0, nativeHandle.const())
                 }
             }
         }
@@ -74,18 +77,43 @@ public class SignalMessage: NativeHandleOwner {
         receiver: PublicKey,
         macKey: Bytes
     ) throws -> Bool {
-        return try withNativeHandles(self, sender, receiver) { messageHandle, senderHandle, receiverHandle in
-            try macKey.withUnsafeBorrowedBuffer {
-                var result = false
-                try checkError(signal_message_verify_mac(
-                    &result,
-                    messageHandle,
-                    senderHandle,
-                    receiverHandle,
-                    $0
-                ))
-                return result
+        return try withAllBorrowed(
+            self,
+            sender,
+            receiver,
+            .bytes(macKey)
+        ) { messageHandle, senderHandle, receiverHandle, macKey in
+            try invokeFnReturningBool {
+                signal_message_verify_mac(
+                    $0,
+                    messageHandle.const(),
+                    senderHandle.const(),
+                    receiverHandle.const(),
+                    macKey
+                )
             }
         }
+    }
+}
+
+extension SignalMutPointerSignalMessage: SignalMutPointer {
+    public typealias ConstPointer = SignalConstPointerSignalMessage
+
+    public init(untyped: OpaquePointer?) {
+        self.init(raw: untyped)
+    }
+
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+
+    public func const() -> Self.ConstPointer {
+        Self.ConstPointer(raw: self.raw)
+    }
+}
+
+extension SignalConstPointerSignalMessage: SignalConstPointer {
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
     }
 }

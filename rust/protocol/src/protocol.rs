@@ -3,17 +3,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use crate::state::{KyberPreKeyId, PreKeyId, SignedPreKeyId};
-use crate::{
-    kem, proto, IdentityKey, PrivateKey, PublicKey, Result, SignalProtocolError, Timestamp,
-};
-
 use hmac::{Hmac, Mac};
 use prost::Message;
 use rand::{CryptoRng, Rng};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
+
+use crate::state::{KyberPreKeyId, PreKeyId, SignedPreKeyId};
+use crate::{
+    IdentityKey, PrivateKey, PublicKey, Result, SignalProtocolError, Timestamp, kem, proto,
+};
 
 pub(crate) const CIPHERTEXT_MESSAGE_CURRENT_VERSION: u8 = 4;
 // Backward compatible, lacking Kyber keys, version
@@ -28,8 +28,9 @@ pub enum CiphertextMessage {
     PlaintextContent(PlaintextContent),
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug, num_enum::TryFromPrimitive)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, derive_more::TryFrom)]
 #[repr(u8)]
+#[try_from(repr)]
 pub enum CiphertextMessageType {
     Whisper = 2,
     PreKey = 3,
@@ -62,15 +63,17 @@ pub struct SignalMessage {
     message_version: u8,
     sender_ratchet_key: PublicKey,
     counter: u32,
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), expect(dead_code))]
     previous_counter: u32,
     ciphertext: Box<[u8]>,
+    pq_ratchet: spqr::SerializedState,
     serialized: Box<[u8]>,
 }
 
 impl SignalMessage {
     const MAC_LENGTH: usize = 8;
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         message_version: u8,
         mac_key: &[u8],
@@ -80,12 +83,18 @@ impl SignalMessage {
         ciphertext: &[u8],
         sender_identity_key: &IdentityKey,
         receiver_identity_key: &IdentityKey,
+        pq_ratchet: &[u8],
     ) -> Result<Self> {
         let message = proto::wire::SignalMessage {
             ratchet_key: Some(sender_ratchet_key.serialize().into_vec()),
             counter: Some(counter),
             previous_counter: Some(previous_counter),
             ciphertext: Some(Vec::<u8>::from(ciphertext)),
+            pq_ratchet: if pq_ratchet.is_empty() {
+                None
+            } else {
+                Some(pq_ratchet.to_vec())
+            },
         };
         let mut serialized = Vec::with_capacity(1 + message.encoded_len() + Self::MAC_LENGTH);
         serialized.push(((message_version & 0xF) << 4) | CIPHERTEXT_MESSAGE_CURRENT_VERSION);
@@ -106,6 +115,7 @@ impl SignalMessage {
             counter,
             previous_counter,
             ciphertext: ciphertext.into(),
+            pq_ratchet: pq_ratchet.to_vec(),
             serialized,
         })
     }
@@ -126,6 +136,11 @@ impl SignalMessage {
     }
 
     #[inline]
+    pub fn pq_ratchet(&self) -> &spqr::SerializedMessage {
+        &self.pq_ratchet
+    }
+
+    #[inline]
     pub fn serialized(&self) -> &[u8] {
         &self.serialized
     }
@@ -141,13 +156,12 @@ impl SignalMessage {
         receiver_identity_key: &IdentityKey,
         mac_key: &[u8],
     ) -> Result<bool> {
-        let our_mac = &Self::compute_mac(
-            sender_identity_key,
-            receiver_identity_key,
-            mac_key,
-            &self.serialized[..self.serialized.len() - Self::MAC_LENGTH],
-        )?;
-        let their_mac = &self.serialized[self.serialized.len() - Self::MAC_LENGTH..];
+        let (content, their_mac) = self
+            .serialized
+            .split_last_chunk::<{ Self::MAC_LENGTH }>()
+            .expect("length checked at construction");
+        let our_mac =
+            Self::compute_mac(sender_identity_key, receiver_identity_key, mac_key, content)?;
         let result: bool = our_mac.ct_eq(their_mac).into();
         if !result {
             // A warning instead of an error because we try multiple sessions.
@@ -175,8 +189,11 @@ impl SignalMessage {
         mac.update(sender_identity_key.public_key().serialize().as_ref());
         mac.update(receiver_identity_key.public_key().serialize().as_ref());
         mac.update(message);
-        let mut result = [0u8; Self::MAC_LENGTH];
-        result.copy_from_slice(&mac.finalize().into_bytes()[..Self::MAC_LENGTH]);
+        let result = *mac
+            .finalize()
+            .into_bytes()
+            .first_chunk()
+            .expect("enough bytes");
         Ok(result)
     }
 }
@@ -229,6 +246,7 @@ impl TryFrom<&[u8]> for SignalMessage {
             counter,
             previous_counter,
             ciphertext,
+            pq_ratchet: proto_structure.pq_ratchet.unwrap_or(vec![]),
             serialized: Box::from(value),
         })
     }
@@ -255,6 +273,8 @@ pub struct PreKeySignalMessage {
     registration_id: u32,
     pre_key_id: Option<PreKeyId>,
     signed_pre_key_id: SignedPreKeyId,
+    // While we reject messages without Kyber payloads, we still for now allow constructing the
+    // struct without one so that we can provide a better error message when we try to process it.
     kyber_payload: Option<KyberPayload>,
     base_key: PublicKey,
     identity_key: IdentityKey,
@@ -263,7 +283,6 @@ pub struct PreKeySignalMessage {
 }
 
 impl PreKeySignalMessage {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         message_version: u8,
         registration_id: u32,
@@ -480,10 +499,11 @@ impl SenderKeyMessage {
     }
 
     pub fn verify_signature(&self, signature_key: &PublicKey) -> Result<bool> {
-        let valid = signature_key.verify_signature(
-            &self.serialized[..self.serialized.len() - Self::SIGNATURE_LEN],
-            &self.serialized[self.serialized.len() - Self::SIGNATURE_LEN..],
-        )?;
+        let (content, signature) = self
+            .serialized
+            .split_last_chunk::<{ Self::SIGNATURE_LEN }>()
+            .expect("length checked on initialization");
+        let valid = signature_key.verify_signature(content, signature);
 
         Ok(valid)
     }
@@ -897,11 +917,11 @@ pub fn extract_decryption_error_message_from_serialized_content(
 
 #[cfg(test)]
 mod tests {
+    use rand::rngs::OsRng;
+    use rand::{CryptoRng, Rng, TryRngCore as _};
+
     use super::*;
     use crate::KeyPair;
-
-    use rand::rngs::OsRng;
-    use rand::{CryptoRng, Rng};
 
     fn create_signal_message<T>(csprng: &mut T) -> Result<SignalMessage>
     where
@@ -928,6 +948,7 @@ mod tests {
             &ciphertext,
             &sender_identity_key_pair.public_key.into(),
             &receiver_identity_key_pair.public_key.into(),
+            b"", // pq_ratchet
         )
     }
 
@@ -942,7 +963,7 @@ mod tests {
 
     #[test]
     fn test_signal_message_serialize_deserialize() -> Result<()> {
-        let mut csprng = OsRng;
+        let mut csprng = OsRng.unwrap_err();
         let message = create_signal_message(&mut csprng)?;
         let deser_message =
             SignalMessage::try_from(message.as_ref()).expect("should deserialize without error");
@@ -952,7 +973,7 @@ mod tests {
 
     #[test]
     fn test_pre_key_signal_message_serialize_deserialize() -> Result<()> {
-        let mut csprng = OsRng;
+        let mut csprng = OsRng.unwrap_err();
         let identity_key_pair = KeyPair::generate(&mut csprng);
         let base_key_pair = KeyPair::generate(&mut csprng);
         let message = create_signal_message(&mut csprng)?;
@@ -1006,7 +1027,7 @@ mod tests {
 
     #[test]
     fn test_sender_key_message_serialize_deserialize() -> Result<()> {
-        let mut csprng = OsRng;
+        let mut csprng = OsRng.unwrap_err();
         let signature_key_pair = KeyPair::generate(&mut csprng);
         let sender_key_message = SenderKeyMessage::new(
             SENDERKEY_MESSAGE_CURRENT_VERSION,
@@ -1044,7 +1065,7 @@ mod tests {
 
     #[test]
     fn test_decryption_error_message() -> Result<()> {
-        let mut csprng = OsRng;
+        let mut csprng = OsRng.unwrap_err();
         let identity_key_pair = KeyPair::generate(&mut csprng);
         let base_key_pair = KeyPair::generate(&mut csprng);
         let message = create_signal_message(&mut csprng)?;

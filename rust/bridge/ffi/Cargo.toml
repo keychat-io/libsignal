@@ -5,10 +5,13 @@
 
 [package]
 name = "libsignal-ffi"
-version = "0.51.1"
-authors = ["Signal Messenger LLC"]
-edition = "2021"
-license = "AGPL-3.0-only"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition = "2024"
+
+[lints]
+workspace = true
 
 [lib]
 name = "signal_ffi"
@@ -18,17 +21,27 @@ crate-type = ["staticlib"]
 # Testing the Swift side of this requires compiling with SIGNAL_MEDIA_SUPPORTED enabled for both Swift and C:
 #     swift test -Xswiftc -DSIGNAL_MEDIA_SUPPORTED -Xcc -DSIGNAL_MEDIA_SUPPORTED
 signal-media = ["libsignal-bridge/signal-media"]
-testing-fns = ["libsignal-bridge/testing-fns"]
+
+# Here for bridge_fn uniformity
+ffi = []
+default = ["ffi"]
 
 [dependencies]
-libsignal-bridge = { path = "../shared", features = ["ffi"] }
-libsignal-net = { path = "../../net" }
-libsignal-protocol = { path = "../../protocol" }
-signal-media = { path = "../../media" }
+libsignal-bridge = { workspace = true, features = ["ffi"] }
+libsignal-bridge-macros = { workspace = true }
+libsignal-bridge-testing = { workspace = true, features = ["ffi"], optional = true }
+libsignal-core = { workspace = true }
+libsignal-net = { workspace = true }
+libsignal-net-chat = { workspace = true }
+libsignal-protocol = { workspace = true }
+signal-media = { workspace = true }
 
-futures-util = "0.3"
-log = "0.4"
-log-panics = { version = "2.1.0", features = ["with-backtrace"] }
+hex = { workspace = true }
+log = { workspace = true }
+log-panics = { workspace = true, features = ["with-backtrace"] }
+paste = { workspace = true }
+uuid = { workspace = true }
+zerocopy = { workspace = true }
 
 [target.aarch64-apple-ios.dependencies]
-cpufeatures = "0.2.1" # Make sure iOS gets optimized crypto.
+cpufeatures = "0.2.6" # Make sure iOS gets optimized crypto.

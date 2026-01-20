@@ -22,21 +22,20 @@
 // Curve signing key, using the NIST p-256 curve.
 
 use std::collections::HashMap;
-
+use std::sync::LazyLock;
 use std::time::SystemTime;
 
-use boring::asn1::{Asn1Time, Asn1TimeRef};
-use boring::bn::BigNumContext;
-use boring::ec::*;
-use boring::error::ErrorStack;
-use boring::nid::Nid;
-use boring::pkey::{PKey, PKeyRef, Public};
-use boring::x509::crl::X509CRLRef;
-use boring::x509::store::{X509Store, X509StoreBuilder};
-use boring::x509::verify::X509VerifyFlags;
-use boring::x509::{X509Ref, X509};
+use boring_signal::asn1::{Asn1Time, Asn1TimeRef};
+use boring_signal::bn::BigNumContext;
+use boring_signal::ec::*;
+use boring_signal::error::ErrorStack;
+use boring_signal::nid::Nid;
+use boring_signal::pkey::{PKey, PKeyRef, Public};
+use boring_signal::x509::crl::X509CRLRef;
+use boring_signal::x509::store::{X509Store, X509StoreBuilder};
+use boring_signal::x509::verify::X509VerifyFlags;
+use boring_signal::x509::{X509, X509Ref};
 use hex::ToHex;
-use lazy_static::lazy_static;
 use uuid::Uuid;
 
 use crate::dcap::ecdsa::EcdsaSigned;
@@ -81,8 +80,8 @@ const INTEL_ROOT_PUB_KEY: &[u8] = &[
 ///
 /// * `expected_mrenclave` - The MRENCLAVE that the quote must match
 /// * `acceptable_sw_advisories` - In the event that the remote TCB has known vulnerabilities that
-///                                require SW mitigations, the list of vulnerabilities that are
-///                                known to be mitigated in `expected_mrenclave`.
+///   require SW mitigations, the list of vulnerabilities that are known to be
+///   mitigated in `expected_mrenclave`.
 /// * `current_time` - The current system time
 pub fn verify_remote_attestation(
     evidence_bytes: &[u8],
@@ -100,8 +99,7 @@ pub fn verify_remote_attestation(
             .any(|id| !acceptable_sw_advisories.contains(&id.as_str()))
         {
             return Err(Error::new(format!(
-                "TCB contains unmitigated unaccepted advisory ids: {:?}",
-                advisory_ids
+                "TCB contains unmitigated unaccepted advisory ids: {advisory_ids:?}"
             ))
             .into());
         }
@@ -265,16 +263,14 @@ fn attest_impl(
 }
 
 const INTEL_QE_VENDOR_ID: Uuid = uuid::uuid!("939a7233-f79c-4ca9-940a-0db3957f0607");
-lazy_static! {
-    static ref INTEL_PKEY: PKey<Public> = {
-        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).expect("allocate curve");
-        let mut ctx = BigNumContext::new().expect("allocate bignum");
-        let point = EcPoint::from_bytes(&group, INTEL_ROOT_PUB_KEY, &mut ctx)
-            .expect("static intel key should parse");
-        let trusted_root_pubkey = EcKey::from_public_key(&group, &point).expect("should convert");
-        PKey::from_ec_key(trusted_root_pubkey).expect("ec key should convert")
-    };
-}
+static INTEL_PKEY: LazyLock<PKey<Public>> = LazyLock::new(|| {
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).expect("allocate curve");
+    let mut ctx = BigNumContext::new().expect("allocate bignum");
+    let point = EcPoint::from_bytes(&group, INTEL_ROOT_PUB_KEY, &mut ctx)
+        .expect("static intel key should parse");
+    let trusted_root_pubkey = EcKey::from_public_key(&group, &point).expect("should convert");
+    PKey::from_ec_key(trusted_root_pubkey).expect("ec key should convert")
+});
 
 /// Verify that the various certificate chains and CRLs are rooted
 /// in `trusted_pkey`
@@ -362,14 +358,11 @@ pub(crate) fn from_trusted(
 ) -> Result<X509Store> {
     let build = || -> std::result::Result<X509Store, ErrorStack> {
         let mut store_builder = X509StoreBuilder::new().expect("can make a fresh X509StoreBuilder");
-        store_builder
-            .param_mut()
-            .set_flags(
-                X509VerifyFlags::CRL_CHECK
-                    | X509VerifyFlags::CRL_CHECK_ALL
-                    | X509VerifyFlags::X509_STRICT,
-            )
-            .expect("supports CRL checking flags");
+        store_builder.param_mut().set_flags(
+            X509VerifyFlags::CRL_CHECK
+                | X509VerifyFlags::CRL_CHECK_ALL
+                | X509VerifyFlags::X509_STRICT,
+        );
         store_builder.param_mut().set_time(
             current_time
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -434,19 +427,17 @@ fn verify_enclave_source(evidence: &Evidence, endorsements: &SgxEndorsements) ->
     }
 
     // compare isvprodid in report vs collateral
-    let report_isvprodid = evidence.quote.support.qe_report_body.isvprodid.value();
+    let report_isvprodid = evidence.quote.support.qe_report_body.isvprodid.get();
     let collateral_isvprodid = qe_identity.isvprodid;
     if report_isvprodid != collateral_isvprodid {
         return Err(Error::new(format!(
-            "qe isvprodid mismatch: expected {}, actual {}",
-            report_isvprodid, collateral_isvprodid
+            "qe isvprodid mismatch: expected {report_isvprodid}, actual {collateral_isvprodid}"
         )));
     }
 
     // compare miscselect from QE identity and masked miscselect from quote’s QE report
-    let qe_report_miscselect = evidence.quote.support.qe_report_body.miscselect.value();
-    if qe_report_miscselect & qe_identity.miscselect_mask.value() != qe_identity.miscselect.value()
-    {
+    let qe_report_miscselect = evidence.quote.support.qe_report_body.miscselect.get();
+    if qe_report_miscselect & qe_identity.miscselect_mask.get() != qe_identity.miscselect.get() {
         return Err(Error::new("qe miscselect mismatch"));
     }
 
@@ -476,12 +467,11 @@ fn verify_enclave_source(evidence: &Evidence, endorsements: &SgxEndorsements) ->
     // Later, we will also lookup the tcb status in the TcbInfo but if
     // the Enclave Identity tcb status isn't up to date, we can fail right
     // away
-    let report_isvsvn = evidence.quote.support.qe_report_body.isvsvn.value();
+    let report_isvsvn = evidence.quote.support.qe_report_body.isvsvn.get();
     let tcb_status = qe_identity.tcb_status(report_isvsvn);
     if tcb_status != &QeTcbStatus::UpToDate {
         return Err(Error::new(format!(
-            "Enclave version tcb not up to date (was {:?})",
-            tcb_status
+            "Enclave version tcb not up to date (was {tcb_status:?})"
         )));
     }
 
@@ -652,12 +642,12 @@ mod test {
 
     use std::time::{Duration, SystemTime};
 
-    use crate::dcap::endorsements::{QeTcbLevel, TcbInfoVersion};
-    use crate::dcap::fakes::FakeAttestation;
-    use boring::bn::BigNum;
-    use hex_literal::hex;
+    use boring_signal::bn::BigNum;
+    use const_str::hex;
 
     use super::*;
+    use crate::dcap::endorsements::{QeTcbLevel, TcbInfoVersion};
+    use crate::dcap::fakes::FakeAttestation;
 
     const EXPECTED_MRENCLAVE: MREnclave =
         hex!("337ac97ce088a132daeb1308ea3159f807de4a827e875b2c90ce21bf4751196f");
@@ -770,14 +760,16 @@ mod test {
         let evidence_bytes = include_bytes!("../tests/data/dcap-expired.evidence");
         let endorsements_bytes = include_bytes!("../tests/data/dcap-expired.endorsements");
 
-        assert!(verify_remote_attestation(
-            evidence_bytes.as_ref(),
-            endorsements_bytes.as_ref(),
-            &EXPECTED_MRENCLAVE,
-            ACCEPTED_SW_ADVISORIES,
-            current_time,
-        )
-        .is_err());
+        assert!(
+            verify_remote_attestation(
+                evidence_bytes.as_ref(),
+                endorsements_bytes.as_ref(),
+                &EXPECTED_MRENCLAVE,
+                ACCEPTED_SW_ADVISORIES,
+                current_time,
+            )
+            .is_err()
+        );
     }
 
     #[test]

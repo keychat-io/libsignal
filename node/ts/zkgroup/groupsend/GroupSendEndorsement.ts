@@ -3,18 +3,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import ByteArray, { UNCHECKED_AND_UNCLONED } from '../internal/ByteArray';
-import * as Native from '../../../Native';
+import ByteArray, { UNCHECKED_AND_UNCLONED } from '../internal/ByteArray.js';
+import * as Native from '../../Native.js';
 
-import GroupSecretParams from '../groups/GroupSecretParams';
-import GroupSendFullToken from './GroupSendFullToken';
-import GroupSendToken from './GroupSendToken';
+import GroupSecretParams from '../groups/GroupSecretParams.js';
+import GroupSendFullToken from './GroupSendFullToken.js';
+import GroupSendToken from './GroupSendToken.js';
 
 // For docs
 import type {
   default as GroupSendEndorsementsResponse,
   ReceivedEndorsements,
-} from './GroupSendEndorsementsResponse';
+} from './GroupSendEndorsementsResponse.js';
+import CallLinkSecretParams from '../calllinks/CallLinkSecretParams.js';
 
 /**
  * An endorsement for a user or set of users in a group.
@@ -44,7 +45,7 @@ import type {
  * it's still cheaper than a usual zkgroup presentation.)
  */
 export default class GroupSendEndorsement extends ByteArray {
-  constructor(contents: Buffer, marker?: typeof UNCHECKED_AND_UNCLONED) {
+  constructor(contents: Uint8Array, marker?: typeof UNCHECKED_AND_UNCLONED) {
     super(contents, marker ?? Native.GroupSendEndorsement_CheckValidContents);
   }
 
@@ -83,10 +84,20 @@ export default class GroupSendEndorsement extends ByteArray {
    *
    * @see {@link GroupSendToken}
    */
-  toToken(groupParams: GroupSecretParams): GroupSendToken {
-    return new GroupSendToken(
-      Native.GroupSendEndorsement_ToToken(this.contents, groupParams.contents)
-    );
+  toToken(params: GroupSecretParams | CallLinkSecretParams): GroupSendToken {
+    if (params instanceof GroupSecretParams) {
+      return new GroupSendToken(
+        Native.GroupSendEndorsement_ToToken(this.contents, params.contents)
+      );
+    } else if (params instanceof CallLinkSecretParams) {
+      return new GroupSendToken(
+        Native.GroupSendEndorsement_CallLinkParams_ToToken(
+          this.contents,
+          params.contents
+        )
+      );
+    }
+    throw new Error('Unsupported token type');
   }
 
   /**
@@ -98,9 +109,9 @@ export default class GroupSendEndorsement extends ByteArray {
    * Equivalent to {@link #toToken} followed by {@link GroupSendToken#toFullToken}.
    */
   toFullToken(
-    groupParams: GroupSecretParams,
+    params: GroupSecretParams | CallLinkSecretParams,
     expiration: Date
   ): GroupSendFullToken {
-    return this.toToken(groupParams).toFullToken(expiration);
+    return this.toToken(params).toFullToken(expiration);
   }
 }

@@ -15,8 +15,8 @@ import SignalFfi
 ///
 /// - SeeAlso: ``GroupSendEndorsementsResponse/issue(groupMembers:keyPair:)``,
 ///   ``GroupSendFullToken/verify(userIds:now:keyPair:)``
-public class GroupSendDerivedKeyPair: ByteArray {
-    public required init(contents: [UInt8]) throws {
+public class GroupSendDerivedKeyPair: ByteArray, @unchecked Sendable {
+    public required init(contents: Data) throws {
         try super.init(contents, checkValid: signal_group_send_derived_key_pair_check_valid_contents)
     }
 
@@ -28,7 +28,11 @@ public class GroupSendDerivedKeyPair: ByteArray {
         return failOnError {
             try params.withNativeHandle { params in
                 try invokeFnReturningVariableLengthSerialized {
-                    signal_group_send_derived_key_pair_for_expiration($0, UInt64(expiration.timeIntervalSince1970), params)
+                    signal_group_send_derived_key_pair_for_expiration(
+                        $0,
+                        UInt64(expiration.timeIntervalSince1970),
+                        params.const()
+                    )
                 }
             }
         }

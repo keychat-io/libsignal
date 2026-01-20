@@ -3,30 +3,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+use intmap::IntKey;
+
 use crate::backup::WithId;
 use crate::proto::backup::{Chat, Recipient};
 
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, serde::Serialize)]
 pub struct RecipientId(pub(super) u64);
 
 /// Foreign key
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, serde::Serialize)]
 pub struct ChatId(pub(super) u64);
-
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
-pub struct RingerRecipientId(pub(super) RecipientId);
-
-impl From<RingerRecipientId> for RecipientId {
-    fn from(value: RingerRecipientId) -> Self {
-        value.0
-    }
-}
-
-impl PartialEq<RecipientId> for RingerRecipientId {
-    fn eq(&self, other: &RecipientId) -> bool {
-        &self.0 == other
-    }
-}
 
 macro_rules! impl_with_id {
     ($proto:ty, $id:ident, $id_field:ident) => {
@@ -35,6 +22,14 @@ macro_rules! impl_with_id {
 
             fn id(&self) -> Self::Id {
                 $id(self.$id_field)
+            }
+        }
+
+        impl IntKey for $id {
+            type Int = u64;
+            const PRIME: Self::Int = u64::PRIME;
+            fn into_int(self) -> u64 {
+                self.0
             }
         }
     };

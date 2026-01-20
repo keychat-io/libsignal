@@ -5,7 +5,7 @@
 
 // This must match the Rust version of the enum.
 enum BackupLevel {
-  Messages = 200,
-  Media = 201,
+  Free = 200,
+  Paid = 201,
 }
 export default BackupLevel;

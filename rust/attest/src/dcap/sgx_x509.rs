@@ -5,11 +5,12 @@
 
 use std::collections::HashMap;
 
+use asn1::{ObjectIdentifier, SequenceOf, oid};
+use boring_signal::asn1::Asn1ObjectRef;
+use boring_signal::nid::Nid;
+
 use crate::dcap::{Error, Result};
 use crate::error::Context;
-use asn1::{oid, ObjectIdentifier, SequenceOf};
-use boring::asn1::Asn1ObjectRef;
-use boring::nid::Nid;
 
 pub const SGX_EXTENSIONS_OID: &str = "1.2.840.113741.1.13.1";
 const _SGX_EXTENSIONS_OID_OID: ObjectIdentifier = oid!(1, 2, 840, 113741, 1, 13, 1);
@@ -102,13 +103,13 @@ impl SgxPckExtension {
         )?;
 
         Ok(SgxPckExtension {
-            _ppid: ppid.unwrap(),
-            tcb: tcb.unwrap(),
-            pceid: pceid.unwrap(),
-            fmspc: fmspc.unwrap(),
-            _sgx_type: sgx_type.unwrap(),
-            _platform_instance_id: platform_instance_id.unwrap(),
-            _configuration: configuration.unwrap(),
+            _ppid: ppid.expect("initialized by parse_extensions"),
+            tcb: tcb.expect("initialized by parse_extensions"),
+            pceid: pceid.expect("initialized by parse_extensions"),
+            fmspc: fmspc.expect("initialized by parse_extensions"),
+            _sgx_type: sgx_type.expect("initialized by parse_extensions"),
+            _platform_instance_id: platform_instance_id.expect("initialized by parse_extensions"),
+            _configuration: configuration.expect("initialized by parse_extensions"),
         })
     }
 }
@@ -188,16 +189,14 @@ fn parse_extensions<'a>(
                 .with_context(|| sgx_extension_id.to_string())?;
         } else {
             return Err(Error::new(format!(
-                "unexpected extension in PCK certificate {}",
-                sgx_extension_id
+                "unexpected extension in PCK certificate {sgx_extension_id}"
             )));
         }
     }
     for (oid, attr) in attributes {
         if attr.is_none() {
             return Err(Error::new(format!(
-                "could not parse required extension from PCK certificate: {}",
-                oid
+                "could not parse required extension from PCK certificate: {oid}"
             )));
         }
     }
@@ -259,42 +258,45 @@ impl<'a> TryFrom<SequenceOf<'a, SgxExtension<'a>>> for Tcb {
         let mut pcesvn = None;
         let mut cpusvn = None;
 
-        // rustfmt doesn't like this next line,
-        // but it's the only way to get simultaneous mutable references to each element!
-        let [compsvn01, compsvn02, compsvn03, compsvn04, compsvn05, compsvn06, compsvn07, compsvn08, compsvn09, compsvn10, compsvn11, compsvn12, compsvn13, compsvn14, compsvn15, compsvn16] =
-            &mut compsvn;
+        let oid_to_compsvn = [
+            TCB_COMP01SVN_OID,
+            TCB_COMP02SVN_OID,
+            TCB_COMP03SVN_OID,
+            TCB_COMP04SVN_OID,
+            TCB_COMP05SVN_OID,
+            TCB_COMP06SVN_OID,
+            TCB_COMP07SVN_OID,
+            TCB_COMP08SVN_OID,
+            TCB_COMP09SVN_OID,
+            TCB_COMP10SVN_OID,
+            TCB_COMP11SVN_OID,
+            TCB_COMP12SVN_OID,
+            TCB_COMP13SVN_OID,
+            TCB_COMP14SVN_OID,
+            TCB_COMP15SVN_OID,
+            TCB_COMP16SVN_OID,
+        ]
+        .into_iter()
+        .zip(
+            compsvn
+                .iter_mut()
+                .map(|v| v as &mut dyn OptionOfTryFromExtensionValue),
+        )
+        .chain([
+            (
+                TCB_PCESVN_OID,
+                &mut pcesvn as &mut dyn OptionOfTryFromExtensionValue,
+            ),
+            (TCB_CPUSVN_OID, &mut cpusvn),
+        ])
+        .collect();
 
-        parse_extensions(
-            value,
-            HashMap::from([
-                (
-                    TCB_COMP01SVN_OID,
-                    compsvn01 as &mut dyn OptionOfTryFromExtensionValue,
-                ),
-                (TCB_COMP02SVN_OID, compsvn02),
-                (TCB_COMP03SVN_OID, compsvn03),
-                (TCB_COMP04SVN_OID, compsvn04),
-                (TCB_COMP05SVN_OID, compsvn05),
-                (TCB_COMP06SVN_OID, compsvn06),
-                (TCB_COMP07SVN_OID, compsvn07),
-                (TCB_COMP08SVN_OID, compsvn08),
-                (TCB_COMP09SVN_OID, compsvn09),
-                (TCB_COMP10SVN_OID, compsvn10),
-                (TCB_COMP11SVN_OID, compsvn11),
-                (TCB_COMP12SVN_OID, compsvn12),
-                (TCB_COMP13SVN_OID, compsvn13),
-                (TCB_COMP14SVN_OID, compsvn14),
-                (TCB_COMP15SVN_OID, compsvn15),
-                (TCB_COMP16SVN_OID, compsvn16),
-                (TCB_PCESVN_OID, &mut pcesvn),
-                (TCB_CPUSVN_OID, &mut cpusvn),
-            ]),
-        )?;
+        parse_extensions(value, oid_to_compsvn)?;
 
         Ok(Self {
-            compsvn: compsvn.map(Option::unwrap),
-            pcesvn: pcesvn.unwrap(),
-            _cpusvn: cpusvn.unwrap(),
+            compsvn: compsvn.map(|v| v.expect("initialized by parse_extensions")),
+            pcesvn: pcesvn.expect("initialized by parse_extensions"),
+            _cpusvn: cpusvn.expect("initialized by parse_extensions"),
         })
     }
 }
@@ -327,7 +329,7 @@ impl TryFrom<asn1::Enumerated> for SgxType {
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code, reason = "these fields are never read")]
 #[derive(Debug)]
 pub(crate) struct Configuration {
     // TODO should we let clients specify configuration requirements?
@@ -370,9 +372,9 @@ impl<'a> TryFrom<SequenceOf<'a, SgxExtension<'a>>> for Configuration {
         )?;
 
         Ok(Self {
-            dynamic_platform: dynamic_platform.unwrap(),
-            cached_keys: cached_keys.unwrap(),
-            smt_enabled: smt_enabled.unwrap(),
+            dynamic_platform: dynamic_platform.expect("initialized by parse_extensions"),
+            cached_keys: cached_keys.expect("initialized by parse_extensions"),
+            smt_enabled: smt_enabled.expect("initialized by parse_extensions"),
         })
     }
 }

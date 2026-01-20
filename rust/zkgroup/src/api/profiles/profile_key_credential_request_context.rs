@@ -3,13 +3,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use crate::common::serialization::ReservedByte;
-use crate::common::simple_types::*;
-use crate::{api, crypto};
 use partial_default::PartialDefault;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+use crate::common::serialization::ReservedByte;
+use crate::common::simple_types::*;
+use crate::{api, crypto};
+
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct ProfileKeyCredentialRequestContext {
     pub(crate) reserved: ReservedByte,
     pub(crate) aci_bytes: UidBytes,

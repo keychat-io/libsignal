@@ -6,15 +6,36 @@
 [package]
 name = "libsignal-core"
 version = "0.1.0"
-authors = ["Signal Messenger LLC"]
-edition = "2021"
-license = "AGPL-3.0-only"
+authors.workspace = true
+license.workspace = true
+edition = "2024"
+
+[lints]
+workspace = true
 
 [dependencies]
-num_enum = "0.6.1"
-uuid = "1.1.2"
+curve25519-dalek = { workspace = true, features = ["digest"] }
+derive_more = { workspace = true, features = ["from", "into", "try_from"] }
+displaydoc = { workspace = true }
+log = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+x25519-dalek = { workspace = true, features = ["static_secrets"] }
+zerocopy = { workspace = true }
 
 [dev-dependencies]
-hex-literal = "0.4.1"
-proptest = "1.0"
-rand = "0.8"
+assert_matches = { workspace = true }
+boring = { workspace = true }
+boring-sys = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+const-str = { workspace = true }
+criterion = { workspace = true }
+hex = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "curve"
+harness = false

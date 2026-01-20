@@ -3,28 +3,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use crate::proto::storage::PreKeyRecordStructure;
-use crate::{KeyPair, PrivateKey, PublicKey, Result, SignalProtocolError};
+use std::fmt;
 
 use prost::Message;
 
-use std::fmt;
+use crate::proto::storage::PreKeyRecordStructure;
+use crate::{KeyPair, PrivateKey, PublicKey, Result, SignalProtocolError};
 
 /// A unique identifier selecting among this client's known pre-keys.
-#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, derive_more::From, derive_more::Into,
+)]
 pub struct PreKeyId(u32);
-
-impl From<u32> for PreKeyId {
-    fn from(value: u32) -> Self {
-        Self(value)
-    }
-}
-
-impl From<PreKeyId> for u32 {
-    fn from(value: PreKeyId) -> Self {
-        value.0
-    }
-}
 
 impl fmt::Display for PreKeyId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -62,15 +52,18 @@ impl PreKeyRecord {
     }
 
     pub fn key_pair(&self) -> Result<KeyPair> {
-        KeyPair::from_public_and_private(&self.pre_key.public_key, &self.pre_key.private_key)
+        Ok(KeyPair::from_public_and_private(
+            &self.pre_key.public_key,
+            &self.pre_key.private_key,
+        )?)
     }
 
     pub fn public_key(&self) -> Result<PublicKey> {
-        PublicKey::deserialize(&self.pre_key.public_key)
+        Ok(PublicKey::deserialize(&self.pre_key.public_key)?)
     }
 
     pub fn private_key(&self) -> Result<PrivateKey> {
-        PrivateKey::deserialize(&self.pre_key.private_key)
+        Ok(PrivateKey::deserialize(&self.pre_key.private_key)?)
     }
 
     pub fn serialize(&self) -> Result<Vec<u8>> {

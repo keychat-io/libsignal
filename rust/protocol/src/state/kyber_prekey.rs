@@ -3,28 +3,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use crate::proto::storage::SignedPreKeyRecordStructure;
-
-use crate::state::GenericSignedPreKey;
-use crate::{kem, PrivateKey, Result, Timestamp};
-
 use std::fmt;
 
+use rand::TryRngCore as _;
+
+use crate::proto::storage::SignedPreKeyRecordStructure;
+use crate::state::GenericSignedPreKey;
+use crate::{PrivateKey, Result, Timestamp, kem};
+
 /// A unique identifier selecting among this client's known signed pre-keys.
-#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, derive_more::From, derive_more::Into,
+)]
 pub struct KyberPreKeyId(u32);
-
-impl From<u32> for KyberPreKeyId {
-    fn from(value: u32) -> Self {
-        Self(value)
-    }
-}
-
-impl From<KyberPreKeyId> for u32 {
-    fn from(value: KyberPreKeyId) -> Self {
-        value.0
-    }
-}
 
 impl fmt::Display for KyberPreKeyId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -64,8 +55,8 @@ impl KyberPreKeyRecord {
         id: KyberPreKeyId,
         signing_key: &PrivateKey,
     ) -> Result<KyberPreKeyRecord> {
-        let key_pair = kem::KeyPair::generate(kyber_key_type);
-        let mut rng = rand::rngs::OsRng;
+        let mut rng = rand::rngs::OsRng.unwrap_err();
+        let key_pair = kem::KeyPair::generate(kyber_key_type, &mut rng);
         let signature = signing_key
             .calculate_signature(&key_pair.public_key.serialize(), &mut rng)?
             .into_vec();

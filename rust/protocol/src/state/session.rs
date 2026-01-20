@@ -6,15 +6,16 @@
 use std::result::Result;
 use std::time::{Duration, SystemTime};
 
+use bitflags::bitflags;
 use prost::Message;
+use rand::{CryptoRng, Rng};
 use subtle::ConstantTimeEq;
 
-use crate::ratchet::{ChainKey, MessageKeys, RootKey};
-use crate::{kem, IdentityKey, KeyPair, PrivateKey, PublicKey, SignalProtocolError};
-
-use crate::consts;
-use crate::proto::storage::{session_structure, RecordStructure, SessionStructure};
+use crate::proto::storage::{RecordStructure, SessionStructure, session_structure};
+use crate::protocol::CIPHERTEXT_MESSAGE_PRE_KYBER_VERSION;
+use crate::ratchet::{ChainKey, MessageKeyGenerator, RootKey};
 use crate::state::{KyberPreKeyId, PreKeyId, SignedPreKeyId};
+use crate::{IdentityKey, KeyPair, PrivateKey, PublicKey, SignalProtocolError, consts, kem};
 
 /// A distinct error type to keep from accidentally propagating deserialization errors.
 #[derive(Debug)]
@@ -37,6 +38,9 @@ pub(crate) struct UnacknowledgedPreKeyMessageItems<'a> {
     pre_key_id: Option<PreKeyId>,
     signed_pre_key_id: SignedPreKeyId,
     base_key: PublicKey,
+    // Although we require PQXDH for all new sessions now,
+    // we may in theory have an existing X3DH unacknowledged session,
+    // so we leave these optional for now.
     kyber_pre_key_id: Option<KyberPreKeyId>,
     kyber_ciphertext: Option<&'a [u8]>,
     timestamp: SystemTime,
@@ -88,6 +92,42 @@ impl<'a> UnacknowledgedPreKeyMessageItems<'a> {
     }
 }
 
+bitflags! {
+    /// Specifies which criteria make a session "usable" beyond simply having a present sender
+    /// chain.
+    ///
+    /// These requirements are conjunctive, i.e. specifying `NotStale | EstablishedWithPqxdh` means
+    /// the session must be neither stale nor established with X3DH.
+    ///
+    /// This struct is generated using the `bitflags` crate; the [`Flags`](::bitflags::Flags) trait
+    /// provides most of its API surface. It can also use "classic" C bitflag syntax, with `|` for
+    /// union and `&` for intersection (as shown above).
+    #[repr(transparent)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub struct SessionUsabilityRequirements : u32 {
+        /// Requires that a session not be stale.
+        ///
+        /// A non-stale session is one of the following:
+        /// - "incoming", i.e. started by the peer
+        /// - "acknowledged", i.e. started locally but received a response
+        /// - no more than a few weeks old (the exact time is chosen by libsignal)
+        const NotStale = 1 << 0;
+        /// Requires that a session was established using PQXDH (or newer) rather than X3DH/X4DH.
+        ///
+        /// This includes unacknowledged sessions that are using PQXDH, since if they get a
+        /// response, the peer is confirmed to be using PQXDH as well.
+        const EstablishedWithPqxdh = 1 << 1;
+        /// Requires that a session is using SPQR.
+        ///
+        /// **Warning:** This allows unacknowledged sessions that include SPQR in their PreKey
+        /// messages. If the peer downgrades the session (by discarding the SPQR information) and
+        /// the local client allows it, a session that is previously considered "usable" can become
+        /// "not usable" upon receiving a response. Therefore, this should not be used to determine
+        /// whether a session is usable unless future downgrades will also be rejected.
+        const Spqr = 1 << 2;
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct SessionState {
     session: SessionStructure,
@@ -104,6 +144,7 @@ impl SessionState {
         their_identity: &IdentityKey,
         root_key: &RootKey,
         alice_base_key: &PublicKey,
+        pq_ratchet_state: spqr::SerializedState,
     ) -> Self {
         Self {
             session: SessionStructure {
@@ -119,6 +160,7 @@ impl SessionState {
                 remote_registration_id: 0,
                 local_registration_id: 0,
                 alice_base_key: alice_base_key.serialize().into_vec(),
+                pq_ratchet_state,
             },
         }
     }
@@ -196,11 +238,7 @@ impl SessionState {
     }
 
     pub(crate) fn sender_ratchet_key_for_logging(&self) -> Result<String, InvalidSessionError> {
-        Ok(hex::encode(
-            self.sender_ratchet_key()?
-                .public_key_bytes()
-                .expect("no invalid public keys"),
-        ))
+        Ok(hex::encode(self.sender_ratchet_key()?.public_key_bytes()))
     }
 
     pub(crate) fn sender_ratchet_private_key(&self) -> Result<PrivateKey, InvalidSessionError> {
@@ -211,14 +249,32 @@ impl SessionState {
         }
     }
 
-    pub fn has_usable_sender_chain(&self, now: SystemTime) -> Result<bool, InvalidSessionError> {
+    pub fn has_usable_sender_chain(
+        &self,
+        now: SystemTime,
+        requirements: SessionUsabilityRequirements,
+    ) -> Result<bool, InvalidSessionError> {
         if self.session.sender_chain.is_none() {
             return Ok(false);
         }
-        if let Some(pending_pre_key) = &self.session.pending_pre_key {
-            let creation_timestamp =
-                SystemTime::UNIX_EPOCH + Duration::from_secs(pending_pre_key.timestamp);
-            if creation_timestamp + consts::MAX_UNACKNOWLEDGED_SESSION_AGE < now {
+        if requirements.contains(SessionUsabilityRequirements::NotStale) {
+            if let Some(pending_pre_key) = &self.session.pending_pre_key {
+                let creation_timestamp =
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(pending_pre_key.timestamp);
+                if creation_timestamp + consts::MAX_UNACKNOWLEDGED_SESSION_AGE < now {
+                    return Ok(false);
+                }
+            }
+        }
+        #[allow(clippy::collapsible_if)]
+        if requirements.contains(SessionUsabilityRequirements::EstablishedWithPqxdh) {
+            if self.session_version()? <= CIPHERTEXT_MESSAGE_PRE_KYBER_VERSION.into() {
+                return Ok(false);
+            }
+        }
+        #[allow(clippy::collapsible_if)]
+        if requirements.contains(SessionUsabilityRequirements::Spqr) {
+            if self.pq_ratchet_state().is_empty() {
                 return Ok(false);
             }
         }
@@ -376,7 +432,7 @@ impl SessionState {
         &mut self,
         sender: &PublicKey,
         counter: u32,
-    ) -> Result<Option<MessageKeys>, InvalidSessionError> {
+    ) -> Result<Option<MessageKeyGenerator>, InvalidSessionError> {
         if let Some(mut chain_and_index) = self.get_receiver_chain(sender)? {
             let message_key_idx = chain_and_index
                 .0
@@ -386,21 +442,8 @@ impl SessionState {
 
             if let Some(position) = message_key_idx {
                 let message_key = chain_and_index.0.message_keys.remove(position);
-
-                let cipher_key_bytes = message_key
-                    .cipher_key
-                    .try_into()
-                    .map_err(|_| InvalidSessionError("invalid message cipher key"))?;
-                let mac_key_bytes = message_key
-                    .mac_key
-                    .try_into()
-                    .map_err(|_| InvalidSessionError("invalid message MAC key"))?;
-                let iv_bytes = message_key
-                    .iv
-                    .try_into()
-                    .map_err(|_| InvalidSessionError("invalid message IV"))?;
-
-                let keys = MessageKeys::new(cipher_key_bytes, mac_key_bytes, iv_bytes, counter);
+                let keys =
+                    MessageKeyGenerator::from_pb(message_key).map_err(InvalidSessionError)?;
 
                 // Update with message key removed
                 self.session.receiver_chains[chain_and_index.1] = chain_and_index.0;
@@ -414,20 +457,13 @@ impl SessionState {
     pub(crate) fn set_message_keys(
         &mut self,
         sender: &PublicKey,
-        message_keys: &MessageKeys,
+        message_keys: MessageKeyGenerator,
     ) -> Result<(), InvalidSessionError> {
-        let new_keys = session_structure::chain::MessageKey {
-            cipher_key: message_keys.cipher_key().to_vec(),
-            mac_key: message_keys.mac_key().to_vec(),
-            iv: message_keys.iv().to_vec(),
-            index: message_keys.counter(),
-        };
-
         let chain_and_index = self
             .get_receiver_chain(sender)?
             .expect("called set_message_keys for a non-existent chain");
         let mut updated_chain = chain_and_index.0;
-        updated_chain.message_keys.insert(0, new_keys);
+        updated_chain.message_keys.insert(0, message_keys.into_pb());
 
         if updated_chain.message_keys.len() > consts::MAX_MESSAGE_KEYS {
             updated_chain.message_keys.pop();
@@ -477,11 +513,10 @@ impl SessionState {
         self.session.pending_pre_key = Some(pending);
     }
 
-    #[allow(clippy::boxed_local)]
     pub(crate) fn set_kyber_ciphertext(&mut self, ciphertext: kem::SerializedCiphertext) {
         let pending = session_structure::PendingKyberPreKey {
             pre_key_id: u32::MAX, // has to be set to the actual value separately
-            ciphertext: ciphertext.to_vec(),
+            ciphertext: ciphertext.into_vec(),
         };
         self.session.pending_kyber_pre_key = Some(pending);
     }
@@ -500,7 +535,7 @@ impl SessionState {
 
     pub(crate) fn unacknowledged_pre_key_message_items(
         &self,
-    ) -> Result<Option<UnacknowledgedPreKeyMessageItems>, InvalidSessionError> {
+    ) -> Result<Option<UnacknowledgedPreKeyMessageItems<'_>>, InvalidSessionError> {
         if let Some(ref pending_pre_key) = self.session.pending_pre_key {
             Ok(Some(UnacknowledgedPreKeyMessageItems::new(
                 pending_pre_key.pre_key_id.map(Into::into),
@@ -531,6 +566,7 @@ impl SessionState {
             remote_registration_id: _remote_registration_id,
             local_registration_id: _local_registration_id,
             alice_base_key: _alice_base_key,
+            pq_ratchet_state: _pq_ratchet_state,
         } = &self.session;
         // ####### IMPORTANT #######
         // Don't forget to clean up new pending fields.
@@ -560,6 +596,28 @@ impl SessionState {
             .pending_kyber_pre_key
             .as_ref()
             .map(|pending| &pending.ciphertext)
+    }
+
+    pub(crate) fn pq_ratchet_recv(
+        &mut self,
+        msg: &spqr::SerializedMessage,
+    ) -> Result<spqr::MessageKey, spqr::Error> {
+        let spqr::Recv { state, key } = spqr::recv(&self.session.pq_ratchet_state, msg)?;
+        self.session.pq_ratchet_state = state;
+        Ok(key)
+    }
+
+    pub(crate) fn pq_ratchet_send<R: Rng + CryptoRng>(
+        &mut self,
+        csprng: &mut R,
+    ) -> Result<(spqr::SerializedMessage, spqr::MessageKey), spqr::Error> {
+        let spqr::Send { state, key, msg } = spqr::send(&self.session.pq_ratchet_state, csprng)?;
+        self.session.pq_ratchet_state = state;
+        Ok((msg, key))
+    }
+
+    pub(crate) fn pq_ratchet_state(&self) -> &spqr::SerializedState {
+        &self.session.pq_ratchet_state
     }
 }
 
@@ -612,8 +670,14 @@ impl SessionRecord {
         })
     }
 
-    pub(crate) fn has_session_state(
-        &self,
+    /// If there's a session with a matching version and `alice_base_key`, ensures that it is the
+    /// current session, promoting if necessary.
+    ///
+    /// Returns `Ok(true)` if such a session was found, `Ok(false)` if not, and
+    /// `Err(InvalidSessionError)` if an invalid session was found during the search (whether
+    /// current or not).
+    pub(crate) fn promote_matching_session(
+        &mut self,
         version: u32,
         alice_base_key: &[u8],
     ) -> Result<bool, InvalidSessionError> {
@@ -627,13 +691,20 @@ impl SessionRecord {
             }
         }
 
-        for previous in self.previous_session_states() {
+        let mut session_to_promote = None;
+        for (i, previous) in self.previous_session_states().enumerate() {
             let previous = previous?;
             if previous.session_version()? == version
                 && alice_base_key.ct_eq(previous.alice_base_key()).into()
             {
-                return Ok(true);
+                session_to_promote = Some((i, previous));
+                break;
             }
+        }
+
+        if let Some((i, state)) = session_to_promote {
+            self.promote_old_session(i, state);
+            return Ok(true);
         }
 
         Ok(false)
@@ -707,6 +778,10 @@ impl SessionRecord {
         Ok(record.encode_to_vec())
     }
 
+    pub fn current_pq_state(&self) -> Option<&spqr::SerializedState> {
+        self.current_session.as_ref().map(|s| s.pq_ratchet_state())
+    }
+
     pub fn remote_registration_id(&self) -> Result<u32, SignalProtocolError> {
         Ok(self
             .session_state()
@@ -764,9 +839,13 @@ impl SessionRecord {
             .remote_identity_key_bytes()?)
     }
 
-    pub fn has_usable_sender_chain(&self, now: SystemTime) -> Result<bool, SignalProtocolError> {
+    pub fn has_usable_sender_chain(
+        &self,
+        now: SystemTime,
+        requirements: SessionUsabilityRequirements,
+    ) -> Result<bool, SignalProtocolError> {
         match &self.current_session {
-            Some(session) => Ok(session.has_usable_sender_chain(now)?),
+            Some(session) => Ok(session.has_usable_sender_chain(now, requirements)?),
             None => Ok(false),
         }
     }

@@ -3,14 +3,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use crate::curve::KeyType;
-use crate::kem;
+use std::panic::UnwindSafe;
 
 use displaydoc::Display;
+use libsignal_core::curve::{CurveError, KeyType};
 use thiserror::Error;
 use uuid::Uuid;
 
-use std::panic::UnwindSafe;
+use crate::kem;
 
 pub type Result<T> = std::result::Result<T, SignalProtocolError>;
 
@@ -32,11 +32,6 @@ pub enum SignalProtocolError {
     UnrecognizedCiphertextVersion(u8),
     /// unrecognized message version <{0}>
     UnrecognizedMessageVersion(u32),
-
-    /// fingerprint version number mismatch them {0} us {1}
-    FingerprintVersionMismatch(u32, u32),
-    /// fingerprint parsing error
-    FingerprintParsingError,
 
     /// no key type identifier
     NoKeyTypeIdentifier,
@@ -64,6 +59,8 @@ pub enum SignalProtocolError {
     /// missing sender key state for distribution ID {distribution_id}
     NoSenderKeyState { distribution_id: Uuid },
 
+    /// protocol address is invalid: {name}.{device_id}
+    InvalidProtocolAddress { name: String, device_id: u32 },
     /// session with {0} not found
     SessionNotFound(crate::ProtocolAddress),
     /// invalid session: {0}
@@ -92,6 +89,8 @@ pub enum SignalProtocolError {
     UnknownSealedSenderVersion(u8),
     /// self send of a sealed sender message
     SealedSenderSelfSend,
+    /// unknown server certificate ID: {0}
+    UnknownSealedSenderServerCertificateId(u32),
 
     /// bad KEM key type <{0:#04x}>
     BadKEMKeyType(u8),
@@ -110,5 +109,15 @@ impl SignalProtocolError {
         method: &'static str,
     ) -> impl FnOnce(E) -> Self {
         move |error| Self::ApplicationCallbackError(method, Box::new(error))
+    }
+}
+
+impl From<CurveError> for SignalProtocolError {
+    fn from(e: CurveError) -> Self {
+        match e {
+            CurveError::NoKeyTypeIdentifier => Self::NoKeyTypeIdentifier,
+            CurveError::BadKeyType(raw) => Self::BadKeyType(raw),
+            CurveError::BadKeyLength(key_type, len) => Self::BadKeyLength(key_type, len),
+        }
     }
 }

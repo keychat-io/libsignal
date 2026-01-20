@@ -8,4 +8,18 @@ import LibSignalClient
 
 Benchmark.main([
     groupSendEndorsementsSuite,
+    privateKeyOperationsSuite,
+    publicKeyOperationsSuite,
+    hexSuite,
 ])
+
+/// Attempts to prevent the value of `x` from being discarded by the optimizer.
+///
+/// See https://github.com/google/swift-benchmark/issues/69
+@inline(__always)
+internal func blackHole<T>(_ x: T) {
+    @_optimize(none)
+    func assumePointeeIsRead(_: UnsafeRawPointer) {}
+
+    withUnsafePointer(to: x) { assumePointeeIsRead($0) }
+}

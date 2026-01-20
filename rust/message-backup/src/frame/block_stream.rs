@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::task::Poll;
 
 use arrayvec::ArrayVec;
-use futures::{ready, AsyncRead, Stream, StreamExt};
+use futures::{AsyncRead, Stream, StreamExt, ready};
 
 /// Adapter that reads blocks into a stream.
 ///
@@ -96,10 +96,10 @@ impl<S, const N: usize> ExactBlockStream<N, S> {
 }
 
 impl<
-        S: Stream<Item = Result<ArrayVec<u8, N>, E>> + Unpin,
-        E: Into<futures::io::Error>,
-        const N: usize,
-    > Stream for ExactBlockStream<N, S>
+    S: Stream<Item = Result<ArrayVec<u8, N>, E>> + Unpin,
+    E: Into<futures::io::Error>,
+    const N: usize,
+> Stream for ExactBlockStream<N, S>
 {
     type Item = futures::io::Result<[u8; N]>;
     fn poll_next(
@@ -127,10 +127,11 @@ impl<R: AsyncRead + Unpin, const N: usize> ExactReadBlockStream<N, R> {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use assert_matches::assert_matches;
     use futures::executor::block_on;
     use futures::{FutureExt, StreamExt, TryStreamExt as _};
+
+    use super::*;
 
     #[test]
     fn empty() {
@@ -219,10 +220,7 @@ mod test {
 
         // An error from the reader should be bubbled up.
         sender
-            .unbounded_send(Err(futures::io::Error::new(
-                futures::io::ErrorKind::Other,
-                "unknown error",
-            )))
+            .unbounded_send(Err(futures::io::Error::other("unknown error")))
             .expect("can send");
 
         assert_matches!(
@@ -266,7 +264,7 @@ mod test {
 
         impl From<IntoIoError> for futures::io::Error {
             fn from(IntoIoError: IntoIoError) -> Self {
-                futures::io::Error::new(futures::io::ErrorKind::Other, "into io error")
+                futures::io::Error::other("into io error")
             }
         }
 

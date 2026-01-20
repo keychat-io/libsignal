@@ -3,17 +3,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+use aes_gcm_siv::aead::Aead;
+use aes_gcm_siv::aead::generic_array::GenericArray;
+use aes_gcm_siv::{Aes256GcmSiv, KeyInit};
+use partial_default::PartialDefault;
+use serde::{Deserialize, Serialize};
+
 use crate::common::constants::*;
 use crate::common::errors::*;
 use crate::common::serialization::ReservedByte;
 use crate::common::sho::*;
 use crate::common::simple_types::*;
+use crate::crypto::uid_encryption;
 use crate::{api, crypto};
-use aes_gcm_siv::aead::generic_array::GenericArray;
-use aes_gcm_siv::aead::Aead;
-use aes_gcm_siv::{Aes256GcmSiv, KeyInit};
-use partial_default::PartialDefault;
-use serde::{Deserialize, Serialize};
 
 #[derive(Copy, Clone, Serialize, Deserialize, Default)]
 pub struct GroupMasterKey {
@@ -28,6 +30,12 @@ pub struct GroupSecretParams {
     blob_key: AesKeyBytes,
     pub(crate) uid_enc_key_pair: crypto::uid_encryption::KeyPair,
     pub(crate) profile_key_enc_key_pair: crypto::profile_key_encryption::KeyPair,
+}
+
+impl AsRef<uid_encryption::KeyPair> for GroupSecretParams {
+    fn as_ref(&self) -> &uid_encryption::KeyPair {
+        &self.uid_enc_key_pair
+    }
 }
 
 #[derive(Copy, Clone, Serialize, Deserialize, PartialDefault)]
@@ -52,10 +60,7 @@ impl GroupSecretParams {
             b"Signal_ZKGroup_20200424_Random_GroupSecretParams_Generate",
             &randomness,
         );
-        let mut master_key: GroupMasterKey = Default::default();
-        master_key
-            .bytes
-            .copy_from_slice(&sho.squeeze(GROUP_MASTER_KEY_LEN)[..]);
+        let master_key = GroupMasterKey::new(sho.squeeze_as_array());
         GroupSecretParams::derive_from_master_key(master_key)
     }
 
@@ -64,10 +69,8 @@ impl GroupSecretParams {
             b"Signal_ZKGroup_20200424_GroupMasterKey_GroupSecretParams_DeriveFromMasterKey",
             &master_key.bytes,
         );
-        let mut group_id: GroupIdentifierBytes = Default::default();
-        let mut blob_key: AesKeyBytes = Default::default();
-        group_id.copy_from_slice(&sho.squeeze(GROUP_IDENTIFIER_LEN)[..]);
-        blob_key.copy_from_slice(&sho.squeeze(AES_KEY_LEN)[..]);
+        let group_id: GroupIdentifierBytes = sho.squeeze_as_array();
+        let blob_key: AesKeyBytes = sho.squeeze_as_array();
         let uid_enc_key_pair = crypto::uid_encryption::KeyPair::derive_from(sho.as_mut());
         let profile_key_enc_key_pair =
             crypto::profile_key_encryption::KeyPair::derive_from(sho.as_mut());
@@ -173,9 +176,8 @@ impl GroupSecretParams {
             b"Signal_ZKGroup_20200424_Random_GroupSecretParams_EncryptBlob",
             &randomness,
         );
-        let nonce_vec = sho.squeeze(AESGCM_NONCE_LEN);
-        let mut ciphertext_vec =
-            self.encrypt_blob_aesgcmsiv(&self.blob_key, &nonce_vec[..], plaintext);
+        let nonce_vec = sho.squeeze_as_array::<AESGCM_NONCE_LEN>();
+        let mut ciphertext_vec = self.encrypt_blob_aesgcmsiv(&self.blob_key, &nonce_vec, plaintext);
         ciphertext_vec.extend(nonce_vec);
         ciphertext_vec.extend([0u8]); // reserved byte
         ciphertext_vec
@@ -202,8 +204,9 @@ impl GroupSecretParams {
             return Err(ZkGroupVerificationFailure);
         }
         let unreserved_len = ciphertext.len() - 1;
-        let nonce = &ciphertext[unreserved_len - AESGCM_NONCE_LEN..unreserved_len];
-        let ciphertext = &ciphertext[..unreserved_len - AESGCM_NONCE_LEN];
+        let (ciphertext, nonce) = ciphertext[..unreserved_len]
+            .split_last_chunk::<AESGCM_NONCE_LEN>()
+            .expect("checked length already");
         self.decrypt_blob_aesgcmsiv(&self.blob_key, nonce, ciphertext)
     }
 
@@ -213,13 +216,11 @@ impl GroupSecretParams {
     ) -> Result<Vec<u8>, ZkGroupVerificationFailure> {
         let mut decrypted = self.decrypt_blob(ciphertext)?;
 
-        if decrypted.len() < ENCRYPTED_BLOB_PADDING_LENGTH_SIZE {
-            return Err(ZkGroupVerificationFailure);
-        }
-        let (padding_len_bytes, plaintext_plus_padding) =
-            decrypted.split_at(ENCRYPTED_BLOB_PADDING_LENGTH_SIZE);
+        let (padding_len_bytes, plaintext_plus_padding) = decrypted
+            .split_first_chunk::<ENCRYPTED_BLOB_PADDING_LENGTH_SIZE>()
+            .ok_or(ZkGroupVerificationFailure)?;
 
-        let padding_len = u32::from_be_bytes(padding_len_bytes.try_into().expect("correct size"));
+        let padding_len = u32::from_be_bytes(*padding_len_bytes);
         if plaintext_plus_padding.len() < padding_len as usize {
             return Err(ZkGroupVerificationFailure);
         }

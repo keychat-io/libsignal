@@ -3,21 +3,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import { randomBytes } from 'crypto';
+import { randomBytes } from 'node:crypto';
 
-import ByteArray from '../internal/ByteArray';
-import { RANDOM_LENGTH } from '../internal/Constants';
-import * as Native from '../../../Native';
+import ByteArray from '../internal/ByteArray.js';
+import { RANDOM_LENGTH } from '../internal/Constants.js';
+import * as Native from '../../Native.js';
 
-import CallLinkSecretParams from './CallLinkSecretParams';
-import CallLinkAuthCredentialPresentation from './CallLinkAuthCredentialPresentation';
-import GenericServerPublicParams from '../GenericServerPublicParams';
-import { Aci } from '../../Address';
+import CallLinkSecretParams from './CallLinkSecretParams.js';
+import CallLinkAuthCredentialPresentation from './CallLinkAuthCredentialPresentation.js';
+import GenericServerPublicParams from '../GenericServerPublicParams.js';
+import { Aci } from '../../Address.js';
 
 export default class CallLinkAuthCredential extends ByteArray {
   private readonly __type?: never;
 
-  constructor(contents: Buffer) {
+  constructor(contents: Uint8Array) {
     super(contents, Native.CallLinkAuthCredential_CheckValidContents);
   }
 
@@ -42,7 +42,7 @@ export default class CallLinkAuthCredential extends ByteArray {
     redemptionTime: number,
     serverParams: GenericServerPublicParams,
     callLinkParams: CallLinkSecretParams,
-    random: Buffer
+    random: Uint8Array
   ): CallLinkAuthCredentialPresentation {
     return new CallLinkAuthCredentialPresentation(
       Native.CallLinkAuthCredential_PresentDeterministic(

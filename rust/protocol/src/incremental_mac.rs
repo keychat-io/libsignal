@@ -4,8 +4,8 @@
 //
 
 use aes::cipher::Unsigned;
-use hmac::digest::generic_array::{ArrayLength, GenericArray};
 use hmac::Mac;
+use hmac::digest::generic_array::{ArrayLength, GenericArray};
 use sha2::digest::{FixedOutput, MacError, Output};
 
 #[derive(Clone)]
@@ -40,7 +40,7 @@ where
         return MINIMUM_CHUNK_SIZE;
     }
     if data_size < target_chunk_count * MAXIMUM_CHUNK_SIZE {
-        return (data_size + target_chunk_count - 1) / target_chunk_count;
+        return data_size.div_ceil(target_chunk_count);
     }
     MAXIMUM_CHUNK_SIZE
 }
@@ -55,15 +55,18 @@ impl<M: Mac + Clone> Incremental<M> {
         }
     }
 
-    pub fn validating<A, I>(self, macs: I) -> Validating<M>
+    pub fn validating<'a, A, I>(self, macs: I) -> Validating<M>
     where
-        A: AsRef<[u8]>,
-        I: IntoIterator<Item = A>,
-        <I as IntoIterator>::IntoIter: DoubleEndedIterator,
+        // This is a clunky way to spell an iterator over `&'a [u8; M::OutputSize]`, which requires
+        // feature(generic_const_exprs). The Sized requirement is because the older version of
+        // generic-array we're using (via the digest crate) provides From<&[u8]>; it was removed in
+        // generic-array 1.0.
+        A: Into<&'a GenericArray<u8, M::OutputSize>> + std::ops::Deref<Target: Sized>,
+        I: IntoIterator<Item = A, IntoIter: DoubleEndedIterator>,
     {
         let expected = macs
             .into_iter()
-            .map(|mac| GenericArray::<u8, M::OutputSize>::from_slice(mac.as_ref()).to_owned())
+            .map(|mac| mac.into().to_owned())
             .rev()
             .collect();
         Validating {
@@ -136,17 +139,16 @@ impl<M: Mac + Clone> Validating<M> {
 
 #[cfg(test)]
 mod test {
-    use hex_literal::hex;
+    use const_str::hex;
     use hmac::Hmac;
     use proptest::prelude::*;
-    use rand::distributions::Uniform;
+    use rand::distr::uniform::{UniformSampler as _, UniformUsize};
     use rand::prelude::{Rng, ThreadRng};
-    use sha2::digest::OutputSizeUser;
     use sha2::Sha256;
-
-    use crate::crypto::hmac_sha256;
+    use sha2::digest::OutputSizeUser;
 
     use super::*;
+    use crate::crypto::hmac_sha256;
 
     const TEST_HMAC_KEY: &[u8] =
         &hex!("a83481457efecc69ad1342e21d9c0297f71debbf5c9304b4c1b2e433c1a78f98");
@@ -240,8 +242,7 @@ mod test {
             expected_macs.into_iter().map(|mac| mac.into()).collect();
 
         {
-            let mut validating =
-                new_incremental(key, TEST_CHUNK_SIZE).validating(expected_bytes.clone());
+            let mut validating = new_incremental(key, TEST_CHUNK_SIZE).validating(&expected_bytes);
             validating
                 .update(bytes)
                 .expect("update: validation should succeed");
@@ -256,7 +257,7 @@ mod test {
                 .first_mut()
                 .expect("there must be at least one mac")[0] ^= 0xff;
             let mut validating =
-                new_incremental(key, TEST_CHUNK_SIZE).validating(failing_first_update);
+                new_incremental(key, TEST_CHUNK_SIZE).validating(&failing_first_update);
             validating.update(bytes).expect_err("MacError");
         }
 
@@ -265,7 +266,8 @@ mod test {
             failing_finalize
                 .last_mut()
                 .expect("there must be at least one mac")[0] ^= 0xff;
-            let mut validating = new_incremental(key, TEST_CHUNK_SIZE).validating(failing_finalize);
+            let mut validating =
+                new_incremental(key, TEST_CHUNK_SIZE).validating(&failing_finalize);
             validating.update(bytes).expect("update should succeed");
             validating.finalize().expect_err("MacError");
         }
@@ -280,7 +282,7 @@ mod test {
         {
             let missing_first_mac: Vec<_> = expected_bytes.clone().into_iter().skip(1).collect();
             let mut validating =
-                new_incremental(key, TEST_CHUNK_SIZE).validating(missing_first_mac);
+                new_incremental(key, TEST_CHUNK_SIZE).validating(&missing_first_mac);
             validating.update(bytes).expect_err("MacError");
         }
         // To make clippy happy and allow extending the test in the future
@@ -300,7 +302,7 @@ mod test {
         let expected_bytes: Vec<[u8; 32]> =
             expected_macs.into_iter().map(|mac| mac.into()).collect();
 
-        let mut validating = new_incremental(key, TEST_CHUNK_SIZE).validating(expected_bytes);
+        let mut validating = new_incremental(key, TEST_CHUNK_SIZE).validating(&expected_bytes);
 
         // Splitting input into chunks of 16 will give us one full incremental chunk + 3 bytes
         // authenticated by call to finalize.
@@ -339,7 +341,7 @@ mod test {
                 .collect();
             produced.push(incremental.finalize().into());
 
-            let mut validating = new_incremental(key, TEST_CHUNK_SIZE).validating(produced);
+            let mut validating = new_incremental(key, TEST_CHUNK_SIZE).validating(&produced);
             for chunk in input_chunks.clone() {
                 validating.update(chunk).expect("update: validation should succeed");
             }
@@ -398,7 +400,7 @@ mod test {
     fn total_digest_size_is_never_too_big() {
         fn total_digest_size(data_size: usize) -> usize {
             let chunk_size = calculate_chunk_size::<Sha256>(data_size);
-            let num_chunks = std::cmp::max(1, (data_size + chunk_size - 1) / chunk_size);
+            let num_chunks = std::cmp::max(1, data_size.div_ceil(chunk_size));
             num_chunks * <Sha256 as OutputSizeUser>::OutputSize::USIZE
         }
         let config = ProptestConfig::with_cases(10_000);
@@ -413,7 +415,7 @@ mod test {
     #[derive(Clone)]
     struct RandomChunks<'a, T, R: Rng> {
         base: &'a [T],
-        distribution: Uniform<usize>,
+        distribution: UniformUsize,
         rng: R,
     }
 
@@ -424,7 +426,7 @@ mod test {
             if self.base.is_empty() {
                 None
             } else {
-                let candidate = self.rng.sample(self.distribution);
+                let candidate = self.distribution.sample(&mut self.rng);
                 let chunk_size = std::cmp::min(candidate, self.base.len());
                 let (before, after) = self.base.split_at(chunk_size);
                 self.base = after;
@@ -434,15 +436,15 @@ mod test {
     }
 
     trait RandomChunksIterator<T> {
-        fn random_chunks(&self, max_size: usize) -> RandomChunks<T, ThreadRng>;
+        fn random_chunks(&self, max_size: usize) -> RandomChunks<'_, T, ThreadRng>;
     }
 
     impl<T> RandomChunksIterator<T> for [T] {
-        fn random_chunks(&self, max_size: usize) -> RandomChunks<T, ThreadRng> {
+        fn random_chunks(&self, max_size: usize) -> RandomChunks<'_, T, ThreadRng> {
             assert!(max_size > 0, "Maximal chunk size should be positive");
             RandomChunks {
                 base: self,
-                distribution: Uniform::new(0, max_size + 1),
+                distribution: UniformUsize::new_inclusive(0, max_size).expect("valid range"),
                 rng: Default::default(),
             }
         }

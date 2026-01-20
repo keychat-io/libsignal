@@ -3,16 +3,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import { randomBytes } from 'crypto';
-import { RANDOM_LENGTH } from '../internal/Constants';
-import * as Native from '../../../Native';
+import { randomBytes } from 'node:crypto';
+import { RANDOM_LENGTH } from '../internal/Constants.js';
+import * as Native from '../../Native.js';
 
-import UuidCiphertext from './UuidCiphertext';
+import UuidCiphertext from './UuidCiphertext.js';
 
-import ProfileKeyCiphertext from './ProfileKeyCiphertext';
-import ProfileKey from '../profiles/ProfileKey';
-import GroupSecretParams from './GroupSecretParams';
-import { Aci, ServiceId } from '../../Address';
+import ProfileKeyCiphertext from './ProfileKeyCiphertext.js';
+import ProfileKey from '../profiles/ProfileKey.js';
+import GroupSecretParams from './GroupSecretParams.js';
+import { Aci, ServiceId } from '../../Address.js';
 
 export default class ClientZkGroupCipher {
   groupSecretParams: GroupSecretParams;
@@ -62,13 +62,13 @@ export default class ClientZkGroupCipher {
     );
   }
 
-  encryptBlob(plaintext: Buffer): Buffer {
+  encryptBlob(plaintext: Uint8Array): Uint8Array {
     const random = randomBytes(RANDOM_LENGTH);
 
     return this.encryptBlobWithRandom(random, plaintext);
   }
 
-  encryptBlobWithRandom(random: Buffer, plaintext: Buffer): Buffer {
+  encryptBlobWithRandom(random: Uint8Array, plaintext: Uint8Array): Uint8Array {
     return Native.GroupSecretParams_EncryptBlobWithPaddingDeterministic(
       this.groupSecretParams.getContents(),
       random,
@@ -77,7 +77,7 @@ export default class ClientZkGroupCipher {
     );
   }
 
-  decryptBlob(blobCiphertext: Buffer): Buffer {
+  decryptBlob(blobCiphertext: Uint8Array): Uint8Array {
     return Native.GroupSecretParams_DecryptBlobWithPadding(
       this.groupSecretParams.getContents(),
       blobCiphertext

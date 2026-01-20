@@ -3,53 +3,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import { randomBytes } from 'crypto';
-import { RANDOM_LENGTH } from '../internal/Constants';
-import * as Native from '../../../Native';
+import { randomBytes } from 'node:crypto';
+import { RANDOM_LENGTH } from '../internal/Constants.js';
+import * as Native from '../../Native.js';
 
-import ServerSecretParams from '../ServerSecretParams';
-import AuthCredentialPresentation from './AuthCredentialPresentation';
-import AuthCredentialWithPniResponse from './AuthCredentialWithPniResponse';
-import GroupPublicParams from '../groups/GroupPublicParams';
-import { Aci, Pni } from '../../Address';
+import ServerSecretParams from '../ServerSecretParams.js';
+import AuthCredentialPresentation from './AuthCredentialPresentation.js';
+import AuthCredentialWithPniResponse from './AuthCredentialWithPniResponse.js';
+import GroupPublicParams from '../groups/GroupPublicParams.js';
+import { Aci, Pni } from '../../Address.js';
 
 export default class ServerZkAuthOperations {
   serverSecretParams: ServerSecretParams;
 
   constructor(serverSecretParams: ServerSecretParams) {
     this.serverSecretParams = serverSecretParams;
-  }
-
-  issueAuthCredentialWithPniAsServiceId(
-    aci: Aci,
-    pni: Pni,
-    redemptionTime: number
-  ): AuthCredentialWithPniResponse {
-    const random = randomBytes(RANDOM_LENGTH);
-
-    return this.issueAuthCredentialWithPniAsServiceIdWithRandom(
-      random,
-      aci,
-      pni,
-      redemptionTime
-    );
-  }
-
-  issueAuthCredentialWithPniAsServiceIdWithRandom(
-    random: Buffer,
-    aci: Aci,
-    pni: Pni,
-    redemptionTime: number
-  ): AuthCredentialWithPniResponse {
-    return new AuthCredentialWithPniResponse(
-      Native.ServerSecretParams_IssueAuthCredentialWithPniAsServiceIdDeterministic(
-        this.serverSecretParams,
-        random,
-        aci.getServiceIdFixedWidthBinary(),
-        pni.getServiceIdFixedWidthBinary(),
-        redemptionTime
-      )
-    );
   }
 
   issueAuthCredentialWithPniZkc(
@@ -68,7 +36,7 @@ export default class ServerZkAuthOperations {
   }
 
   issueAuthCredentialWithPniZkcWithRandom(
-    random: Buffer,
+    random: Uint8Array,
     aci: Aci,
     pni: Pni,
     redemptionTime: number

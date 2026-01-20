@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+use aes::cipher::{BlockEncrypt as _, KeyInit as _};
 use partial_default::PartialDefault;
 use serde::{Deserialize, Serialize};
-use signal_crypto::Aes256GcmEncryption;
 use subtle::ConstantTimeEq;
 
 use crate::common::constants::*;
@@ -38,8 +38,7 @@ impl ProfileKey {
             b"Signal_ZKGroup_20200424_Random_ProfileKey_Generate",
             &randomness,
         );
-        let mut bytes = [0u8; PROFILE_KEY_LEN];
-        bytes.copy_from_slice(&sho.squeeze(PROFILE_KEY_LEN)[..]);
+        let bytes = sho.squeeze_as_array();
         Self { bytes }
     }
 
@@ -65,33 +64,20 @@ impl ProfileKey {
         }
     }
 
-    pub fn get_profile_key_version(
-        &self,
-        user_id: libsignal_core::Aci,
-    ) -> api::profiles::ProfileKeyVersion {
-        let uid_bytes = uuid::Uuid::from(user_id).into_bytes();
-        let mut combined_array = [0u8; PROFILE_KEY_LEN + UUID_LEN];
-        combined_array[..PROFILE_KEY_LEN].copy_from_slice(&self.bytes);
-        combined_array[PROFILE_KEY_LEN..].copy_from_slice(&uid_bytes);
-        let mut sho = Sho::new(
-            b"Signal_ZKGroup_20200424_ProfileKeyAndUid_ProfileKey_GetProfileKeyVersion",
-            &combined_array,
-        );
-
-        let pkv_hex_string = hex::encode(&sho.squeeze(PROFILE_KEY_VERSION_LEN)[..]);
-        let mut pkv_hex_array: [u8; PROFILE_KEY_VERSION_ENCODED_LEN] =
-            [0u8; PROFILE_KEY_VERSION_ENCODED_LEN];
-        pkv_hex_array.copy_from_slice(pkv_hex_string.as_bytes());
-        api::profiles::ProfileKeyVersion {
-            bytes: pkv_hex_array,
-        }
-    }
-
     pub fn derive_access_key(&self) -> [u8; ACCESS_KEY_LEN] {
-        let nonce = &[0u8; AESGCM_NONCE_LEN];
-        let mut cipher = Aes256GcmEncryption::new(&self.bytes, nonce, &[]).unwrap();
+        // Uses AES to implement a seeded PRNG, taking the first block of output as the result.
+        // Originally defined as AES-GCM(&mut [0; ACCESS_KEY_LEN], [0; NONCE_LEN], init_ctr=1).
+        // AES-GCM uses the first block to initialize its tag hash, which we discard in this case,
+        // so we can simplify to AES-CTR(&mut [0; ACCESS_KEY_LEN], [0; NONCE_LEN], init_ctr=2)
+        // and then since our "plaintext" is zeros, this becomes simply raw AES([0, 0, ..., 2]).
+        static_assertions::const_assert_eq!(ACCESS_KEY_LEN, {
+            type BlockSize = <::aes::Aes256Enc as ::aes::cipher::BlockSizeUser>::BlockSize;
+            <BlockSize as ::aes::cipher::Unsigned>::USIZE
+        });
+        let aes = ::aes::Aes256Enc::new((&self.bytes).into());
         let mut buf = [0u8; ACCESS_KEY_LEN];
-        cipher.encrypt(&mut buf[..]);
+        buf[ACCESS_KEY_LEN - 1] = 2;
+        aes.encrypt_block((&mut buf).into());
         buf
     }
 }

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{CString, c_char, c_void};
 
 #[repr(C)]
 pub enum LogLevel {
@@ -42,7 +42,6 @@ impl From<LogLevel> for log::Level {
 
 pub type LogCallback = extern "C" fn(
     ctx: *mut c_void,
-    target: *const c_char,
     level: LogLevel,
     file: *const c_char,
     line: u32,
@@ -73,7 +72,6 @@ impl log::Log for FfiLogger {
             return;
         }
 
-        let target = CString::new(record.target()).expect("no 0 bytes in log target");
         let file = record
             .file()
             .map(|file| CString::new(file).expect("no 0 bytes in file"));
@@ -83,7 +81,6 @@ impl log::Log for FfiLogger {
         });
         (self.log)(
             self.ctx,
-            target.as_ptr(),
             record.level().into(),
             file.as_ref()
                 .map(|file| file.as_ptr())
@@ -98,7 +95,7 @@ impl log::Log for FfiLogger {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn signal_init_logger(max_level: LogLevel, logger: FfiLogger) -> bool {
     match log::set_logger(Box::leak(Box::new(logger))) {
         Ok(_) => {
@@ -107,6 +104,9 @@ pub unsafe extern "C" fn signal_init_logger(max_level: LogLevel, logger: FfiLogg
                 "Initializing libsignal version:{}",
                 env!("CARGO_PKG_VERSION")
             );
+            // These strings are explicitly looked for by build_ffi.sh.
+            log::debug!("THIS BUILD HAS DEBUG-LEVEL LOGS ENABLED");
+            log::trace!("THIS BUILD HAS TRACE-LEVEL LOGS ENABLED");
             log_panics::Config::new()
                 .backtrace_mode(log_panics::BacktraceMode::Unresolved)
                 .install_panic_hook();

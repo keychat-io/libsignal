@@ -4,22 +4,30 @@
 //
 
 import type { ReadonlyDeep } from 'type-fest';
-import * as Native from '../Native';
-import { Aci } from './Address';
+import * as Native from './Native.js';
 import {
-  AppExpiredError,
-  ChatServiceInactive,
-  DeviceDelinkedError,
-  IoError,
-  SvrDataMissingError,
-  SvrRestoreFailedError,
-  SvrRequestFailedError,
-  LibSignalError,
-} from './Errors';
-import { ServerMessageAck, Wrapper } from '../Native';
-import { Buffer } from 'node:buffer';
-
-const DEFAULT_CHAT_REQUEST_TIMEOUT_MILLIS = 5000;
+  cdsiLookup,
+  CDSRequestOptionsType,
+  CDSResponseType,
+} from './net/CDSI.js';
+import {
+  ChatConnection,
+  ConnectionEventsListener,
+  UnauthenticatedChatConnection,
+  AuthenticatedChatConnection,
+  ChatServiceListener,
+  ProvisioningConnection,
+  ProvisioningConnectionListener,
+} from './net/Chat.js';
+import { RegistrationService } from './net/Registration.js';
+import { SvrB } from './net/SvrB.js';
+import { BridgedStringMap, newNativeHandle } from './internal.js';
+export * from './net/CDSI.js';
+export * from './net/Chat.js';
+export * from './net/chat/UnauthMessagesService.js';
+export * from './net/chat/UnauthUsernamesService.js';
+export * from './net/Registration.js';
+export * from './net/SvrB.js';
 
 // This must match the libsignal-bridge Rust enum of the same name.
 export enum Environment {
@@ -27,32 +35,24 @@ export enum Environment {
   Production = 1,
 }
 
+/**
+ * Build variant for remote config key selection.
+ *
+ * This must match the libsignal-bridge Rust enum of the same name.
+ *
+ * - `Production`: Use for release builds. Only uses base remote config keys without suffixes.
+ * - `Beta`: Use for all other builds (nightly, alpha, internal, public betas). Prefers
+ *   keys with a `.beta` suffix, falling back to base keys if the suffixed key is not present.
+ */
+export enum BuildVariant {
+  Production = 0,
+  Beta = 1,
+}
+
 export type ServiceAuth = {
   username: string;
   password: string;
 };
-
-export type CDSRequestOptionsType = {
-  e164s: Array<string>;
-  acisAndAccessKeys: Array<{ aci: string; accessKey: string }>;
-  returnAcisWithoutUaks: boolean;
-  abortSignal?: AbortSignal;
-};
-
-export type CDSResponseEntryType<Aci, Pni> = {
-  aci: Aci | undefined;
-  pni: Pni | undefined;
-};
-
-export type CDSResponseEntries<Aci, Pni> = Map<
-  string,
-  CDSResponseEntryType<Aci, Pni>
->;
-
-export interface CDSResponseType<Aci, Pni> {
-  entries: CDSResponseEntries<Aci, Pni>;
-  debugPermitsUsed: number;
-}
 
 export type ChatRequest = Readonly<{
   verb: string;
@@ -62,13 +62,7 @@ export type ChatRequest = Readonly<{
   timeoutMillis?: number;
 }>;
 
-type ConnectionManager = Wrapper<Native.ConnectionManager>;
-
-function newNativeHandle<T>(handle: T): Wrapper<T> {
-  return {
-    _nativeHandle: handle,
-  };
-}
+type ConnectionManager = Native.Wrapper<Native.ConnectionManager>;
 
 /** Low-level async runtime control, mostly just exported for testing. */
 export class TokioAsyncContext {
@@ -80,13 +74,9 @@ export class TokioAsyncContext {
 
   makeCancellable<T>(
     abortSignal: AbortSignal | undefined,
-    promise: Promise<T>
+    promise: Native.CancellablePromise<T>
   ): Promise<T> {
-    if (
-      abortSignal !== undefined &&
-      '_cancellationToken' in promise &&
-      typeof promise._cancellationToken === 'bigint'
-    ) {
+    if (abortSignal !== undefined) {
       const cancellationToken = promise._cancellationToken;
       const cancel = () => {
         Native.TokioAsyncContext_cancel(this, cancellationToken);
@@ -102,297 +92,222 @@ export class TokioAsyncContext {
   }
 }
 
-export class ChatServerMessageAck {
-  private promise: Promise<void> | null = null;
-
-  constructor(
-    private readonly asyncContext: TokioAsyncContext,
-    readonly _nativeHandle: Native.ServerMessageAck
-  ) {}
-
-  send(): Promise<void> {
-    if (!this.promise) {
-      this.promise = Native.ServerMessageAck_Send(this.asyncContext, this);
+export type NetConstructorOptions = Readonly<
+  | {
+      localTestServer?: false;
+      env: Environment;
+      userAgent: string;
+      remoteConfig?: Map<string, string>;
+      buildVariant?: BuildVariant;
     }
-    return this.promise;
-  }
+  | {
+      localTestServer: true;
+      userAgent: string;
+      TESTING_localServer_chatPort: number;
+      TESTING_localServer_cdsiPort: number;
+      TESTING_localServer_svr2Port: number;
+      TESTING_localServer_svrBPort: number;
+      TESTING_localServer_rootCertificateDer: Uint8Array;
+    }
+>;
+
+/** See {@link Net.setProxy()}. */
+export type ProxyOptions = {
+  scheme: string;
+  host: string;
+  port?: number;
+  username?: string;
+  password?: string;
+};
+
+/** The "scheme" for Signal TLS proxies. See {@link Net.setProxy()}. */
+export const SIGNAL_TLS_PROXY_SCHEME = 'org.signal.tls';
+
+type WithSuffix<Keys extends readonly string[], Suffix extends string> = {
+  [Key in keyof Keys]: `${Keys[Key]}.${Suffix}`;
+};
+
+function withSuffix<Keys extends readonly string[], Suffix extends string>(
+  keys: Keys,
+  suffix: Suffix
+): WithSuffix<Keys, Suffix> {
+  return keys.map((key) => `${key}.${suffix}`) as WithSuffix<Keys, Suffix>;
 }
 
-export interface ChatServiceListener {
-  /**
-   * Called when the server delivers an incoming message to the client.
-   *
-   * `timestamp` is in milliseconds.
-   *
-   * If `ack`'s `send` method is not called, the server will leave this message in the message
-   * queue and attempt to deliver it again in the future.
-   */
-  onIncomingMessage(
-    envelope: Buffer,
-    timestamp: number,
-    ack: ChatServerMessageAck
-  ): void;
+const BETA_REMOTE_CONFIG_KEYS = withSuffix(Native.NetRemoteConfigKeys, 'beta');
+// By convention suffix-less keys mean ".prod". These keys predate convention.
+// TODO: Remove this line once all the non-conventional keys have been removed.
+const PROD_REMOTE_CONFIG_KEYS = ['chatPermessageDeflate.prod'] as const;
 
-  /**
-   * Called when the server indicates that there are no further messages in the message queue.
-   *
-   * Note that further messages may still be delivered; this merely indicates that all messages that
-   * were in the queue *when the connection was established* have been delivered.
-   */
-  onQueueEmpty(): void;
-
-  /**
-   * Called when the client gets disconnected from the server.
-   *
-   * This includes both deliberate disconnects as well as unexpected socket closures that will be
-   * automatically retried.
-   *
-   * Will not be called if no other requests have been invoked for this connection attempt. That is,
-   * you should never see this as the first callback, nor two of these callbacks in a row.
-   */
-  onConnectionInterrupted(): void;
-}
-
-/**
- * Provides API methods to connect and communicate with the Chat Service.
- * Before using either authenticated or unauthenticated channels,
- * a corresponding `connect*` method must be called.
- * It's also important to call {@link #disconnect()} method when the instance is no longer needed.
- */
-export class ChatService {
-  public readonly chatService: Wrapper<Native.Chat>;
-
-  constructor(
-    private readonly asyncContext: TokioAsyncContext,
-    connectionManager: ConnectionManager
-  ) {
-    this.chatService = newNativeHandle(
-      Native.ChatService_new(connectionManager, '', '')
-    );
-  }
-
-  /**
-   * Sets the listener for server push messages on the authenticated connection.
-   *
-   * Note that this creates a **non-garbage-collectable** reference to `listener`. If `listener`
-   * contains a reference to this ChatService (directly or indirectly), both objects will be kept
-   * alive even with no other references. This may be fine if `listener` is a long-lived object
-   * anyway, but if not, make sure to eventually break the cycle, possibly by calling
-   * {@link #clearListener}.
-   */
-  setListener(listener: ChatServiceListener): void {
-    const asyncContext = this.asyncContext;
-    const nativeChatListener = {
-      _incoming_message(
-        envelope: Buffer,
-        timestamp: number,
-        ack: ServerMessageAck
-      ): void {
-        listener.onIncomingMessage(
-          envelope,
-          timestamp,
-          new ChatServerMessageAck(asyncContext, ack)
-        );
-      },
-      _queue_empty(): void {
-        listener.onQueueEmpty();
-      },
-      _connection_interrupted(): void {
-        listener.onConnectionInterrupted();
-      },
-    };
-    Native.ChatServer_SetListener(
-      asyncContext,
-      this.chatService,
-      nativeChatListener
-    );
-  }
-
-  clearListener(): void {
-    Native.ChatServer_SetListener(this.asyncContext, this.chatService, null);
-  }
-
-  /**
-   * Initiates termination of the underlying connection to the Chat Service. After the service is
-   * disconnected, it will not attempt to automatically reconnect until you call
-   * {@link #connectAuthenticated()} and/or {@link #connectUnauthenticated()}.
-   *
-   * Note: the same instance of `ChatService` can be reused after `disconnect()` was
-   * called.
-   */
-  disconnect(): Promise<void> {
-    return Native.ChatService_disconnect(this.asyncContext, this.chatService);
-  }
-
-  /**
-   * Initiates establishing of the underlying unauthenticated connection to the Chat Service. Once
-   * the service is connected, all the requests will be using the established connection. Also, if
-   * the connection is lost for any reason other than the call to {@link #disconnect()}, an
-   * automatic reconnect attempt will be made.
-   *
-   * @throws {AppExpiredError} if the current app version is too old (as judged by the server).
-   * @throws {LibSignalError} with other codes for other failures.
-   */
-  connectUnauthenticated(options?: {
-    abortSignal?: AbortSignal;
-  }): Promise<Native.ChatServiceDebugInfo> {
-    return this.asyncContext.makeCancellable(
-      options?.abortSignal,
-      Native.ChatService_connect_unauth(this.asyncContext, this.chatService)
-    );
-  }
-
-  /**
-   * Initiates establishing of the underlying authenticated connection to the Chat Service. Once the
-   * service is connected, all the requests will be using the established connection. Also, if the
-   * connection is lost for any reason other than the call to {@link #disconnect()}, an automatic
-   * reconnect attempt will be made.
-   *
-   * Calling this method will result in starting to accept incoming requests from the Chat Service.
-   * You should set a listener first using {@link #setListener()}.
-   *
-   * @throws {AppExpiredError} if the current app version is too old (as judged by the server).
-   * @throws {DeviceDelinkedError} if the current device has been delinked.
-   * @throws {LibSignalError} with other codes for other failures.
-   */
-  connectAuthenticated(options?: {
-    abortSignal?: AbortSignal;
-  }): Promise<Native.ChatServiceDebugInfo> {
-    return this.asyncContext.makeCancellable(
-      options?.abortSignal,
-      Native.ChatService_connect_auth(this.asyncContext, this.chatService)
-    );
-  }
-
-  /**
-   * Sends request to the Chat Service over an unauthenticated channel.
-   *
-   * In addition to the response, an object containing debug information about the request flow is
-   * returned.
-   *
-   * @throws {ChatServiceInactive} if you haven't called {@link #connectUnauthenticated()} (as a
-   * rejection of the promise).
-   */
-  unauthenticatedFetchAndDebug(
-    chatRequest: ChatRequest,
-    options?: { abortSignal?: AbortSignal }
-  ): Promise<Native.ResponseAndDebugInfo> {
-    return this.asyncContext.makeCancellable(
-      options?.abortSignal,
-      Native.ChatService_unauth_send_and_debug(
-        this.asyncContext,
-        this.chatService,
-        ChatService.buildHttpRequest(chatRequest),
-        chatRequest.timeoutMillis ?? DEFAULT_CHAT_REQUEST_TIMEOUT_MILLIS
-      )
-    );
-  }
-
-  /**
-   * Sends request to the Chat Service over an unauthenticated channel.
-   *
-   * @throws {ChatServiceInactive} if you haven't called {@link #connectUnauthenticated()} (as a
-   * rejection of the promise).
-   */
-  unauthenticatedFetch(
-    chatRequest: ChatRequest,
-    options?: { abortSignal?: AbortSignal }
-  ): Promise<Native.ChatResponse> {
-    return this.asyncContext.makeCancellable(
-      options?.abortSignal,
-      Native.ChatService_unauth_send(
-        this.asyncContext,
-        this.chatService,
-        ChatService.buildHttpRequest(chatRequest),
-        chatRequest.timeoutMillis ?? DEFAULT_CHAT_REQUEST_TIMEOUT_MILLIS
-      )
-    );
-  }
-
-  /**
-   * Sends request to the Chat Service over an authenticated channel.
-   *
-   * In addition to the response, an object containing debug information about the request flow is
-   * returned.
-   *
-   * @throws {ChatServiceInactive} if you haven't called {@link #connectAuthenticated()} (as a
-   * rejection of the promise).
-   */
-  authenticatedFetchAndDebug(
-    chatRequest: ChatRequest,
-    options?: { abortSignal?: AbortSignal }
-  ): Promise<Native.ResponseAndDebugInfo> {
-    return this.asyncContext.makeCancellable(
-      options?.abortSignal,
-      Native.ChatService_auth_send_and_debug(
-        this.asyncContext,
-        this.chatService,
-        ChatService.buildHttpRequest(chatRequest),
-        chatRequest.timeoutMillis ?? DEFAULT_CHAT_REQUEST_TIMEOUT_MILLIS
-      )
-    );
-  }
-
-  /**
-   * Sends request to the Chat Service over an authenticated channel.
-   *
-   * @throws {ChatServiceInactive} if you haven't called {@link #connectAuthenticated()} (as a
-   * rejection of the promise).
-   */
-  authenticatedFetch(
-    chatRequest: ChatRequest,
-    options?: { abortSignal?: AbortSignal }
-  ): Promise<Native.ChatResponse> {
-    return this.asyncContext.makeCancellable(
-      options?.abortSignal,
-      Native.ChatService_auth_send(
-        this.asyncContext,
-        this.chatService,
-        ChatService.buildHttpRequest(chatRequest),
-        chatRequest.timeoutMillis ?? DEFAULT_CHAT_REQUEST_TIMEOUT_MILLIS
-      )
-    );
-  }
-
-  static buildHttpRequest(chatRequest: ChatRequest): {
-    _nativeHandle: Native.HttpRequest;
-  } {
-    const { verb, path, body, headers } = chatRequest;
-    const bodyBuffer: Buffer | null =
-      body !== undefined ? Buffer.from(body) : null;
-    const httpRequest = {
-      _nativeHandle: Native.HttpRequest_new(verb, path, bodyBuffer),
-    };
-    headers.forEach((header) => {
-      const [name, value] = header;
-      Native.HttpRequest_add_header(httpRequest, name, value);
-    });
-    return httpRequest;
-  }
-}
+export const REMOTE_CONFIG_KEYS = [
+  ...Native.NetRemoteConfigKeys,
+  ...BETA_REMOTE_CONFIG_KEYS,
+  ...PROD_REMOTE_CONFIG_KEYS,
+] as const;
 
 export class Net {
   private readonly asyncContext: TokioAsyncContext;
-  private readonly connectionManager: ConnectionManager;
+  /** Exposed only for testing. */
+  readonly _connectionManager: ConnectionManager;
 
-  /**
-   * Instance of the {@link Svr3Client} to access SVR3.
-   */
-  svr3: Svr3Client;
-
-  constructor(env: Environment, userAgent: string) {
+  constructor(private readonly options: NetConstructorOptions) {
     this.asyncContext = new TokioAsyncContext(Native.TokioAsyncContext_new());
-    this.connectionManager = newNativeHandle(
-      Native.ConnectionManager_new(env, userAgent)
-    );
-    this.svr3 = new Svr3ClientImpl(this.asyncContext, this.connectionManager);
+
+    if (options.localTestServer) {
+      this._connectionManager = newNativeHandle(
+        Native.TESTING_ConnectionManager_newLocalOverride(
+          options.userAgent,
+          options.TESTING_localServer_chatPort,
+          options.TESTING_localServer_cdsiPort,
+          options.TESTING_localServer_svr2Port,
+          options.TESTING_localServer_svrBPort,
+          options.TESTING_localServer_rootCertificateDer
+        )
+      );
+    } else {
+      const {
+        env,
+        userAgent,
+        remoteConfig = new Map<string, string>(),
+        buildVariant = BuildVariant.Production,
+      } = options;
+      this._connectionManager = newNativeHandle(
+        Native.ConnectionManager_new(
+          env,
+          userAgent,
+          new BridgedStringMap(remoteConfig),
+          buildVariant
+        )
+      );
+    }
   }
 
   /**
-   * Creates a new instance of {@link ChatService}.
+   * Starts the process of connecting to the chat server.
+   *
+   * If this completes successfully, the next call to {@link #connectAuthenticatedChat} may be able
+   * to finish more quickly. If it's incomplete or produces an error, such a call will start from
+   * scratch as usual. Only one preconnect is recorded, so there's no point in calling this more
+   * than once.
+   *
+   * @param options additional options to pass through.
+   * @param options.abortSignal an {@link AbortSignal} that will cancel the connection attempt.
    */
-  public newChatService(): ChatService {
-    return new ChatService(this.asyncContext, this.connectionManager);
+  public preconnectChat(options?: {
+    abortSignal?: AbortSignal;
+  }): Promise<void> {
+    return this.asyncContext.makeCancellable(
+      options?.abortSignal,
+      Native.AuthenticatedChatConnection_preconnect(
+        this.asyncContext,
+        this._connectionManager
+      )
+    );
+  }
+
+  /**
+   * Creates a new instance of {@link UnauthenticatedChatConnection}.
+   *
+   * @param listener the listener for incoming events.
+   * @param options additional options to pass through.
+   * @param options.languages If provided, a list of languages in Accept-Language syntax to apply
+   * to all requests made on this connection. Note that "quality weighting" can be left out; the
+   * Signal server will always consider the list to be in priority order.
+   * @param options.abortSignal an {@link AbortSignal} that will cancel the connection attempt.
+   */
+  public async connectUnauthenticatedChat(
+    listener: ConnectionEventsListener,
+    options?: { languages?: string[]; abortSignal?: AbortSignal }
+  ): Promise<UnauthenticatedChatConnection> {
+    const env = this.options.localTestServer ? undefined : this.options.env;
+    return UnauthenticatedChatConnection.connect(
+      this.asyncContext,
+      this._connectionManager,
+      listener,
+      env,
+      options
+    );
+  }
+
+  /**
+   * Creates a new instance of {@link AuthenticatedChatConnection}.
+   *
+   * @param username the identifier for the local device
+   * @param password the password for the local device
+   * @param receiveStories whether or not the local user has Stories enabled, so the server can
+   * filter them out ahead of time
+   * @param listener the listener for incoming events.
+   * @param options additional options to pass through.
+   * @param options.languages If provided, a list of languages in Accept-Language syntax to apply
+   * to all requests made on this connection. Note that "quality weighting" can be left out; the
+   * Signal server will always consider the list to be in priority order.
+   * @param options.abortSignal an {@link AbortSignal} that will cancel the connection attempt.
+   */
+  public connectAuthenticatedChat(
+    username: string,
+    password: string,
+    receiveStories: boolean,
+    listener: ChatServiceListener,
+    options?: { languages?: string[]; abortSignal?: AbortSignal }
+  ): Promise<AuthenticatedChatConnection> {
+    return AuthenticatedChatConnection.connect(
+      this.asyncContext,
+      this._connectionManager,
+      username,
+      password,
+      receiveStories,
+      listener,
+      options
+    );
+  }
+
+  /**
+   * Creates a new instance of {@link ProvisioningConnection}.
+   *
+   * @param listener the listener for incoming events.
+   * @param options additional options to pass through.
+   * @param options.abortSignal an {@link AbortSignal} that will cancel the connection attempt.
+   */
+  public async connectProvisioning(
+    listener: ProvisioningConnectionListener,
+    options?: { abortSignal?: AbortSignal }
+  ): Promise<ProvisioningConnection> {
+    return ProvisioningConnection.connect(
+      this.asyncContext,
+      this._connectionManager,
+      listener,
+      options
+    );
+  }
+
+  public async resumeRegistrationSession({
+    sessionId,
+    e164,
+  }: {
+    sessionId: string;
+    e164: string;
+  }): Promise<RegistrationService> {
+    return RegistrationService.resumeSession(
+      {
+        connectionManager: this._connectionManager,
+        tokioAsyncContext: this.asyncContext,
+      },
+      { sessionId, e164 }
+    );
+  }
+
+  public async createRegistrationSession({
+    e164,
+  }: {
+    e164: string;
+  }): Promise<RegistrationService> {
+    return RegistrationService.createSession(
+      {
+        connectionManager: this._connectionManager,
+        tokioAsyncContext: this.asyncContext,
+      },
+      { e164 }
+    );
   }
 
   /**
@@ -402,284 +317,267 @@ export class Net {
    */
   public setIpv6Enabled(ipv6Enabled: boolean): void {
     Native.ConnectionManager_set_ipv6_enabled(
-      this.connectionManager,
+      this._connectionManager,
       ipv6Enabled
+    );
+  }
+
+  /**
+   * Enables or disables censorship circumvention for all new connections (until changed).
+   *
+   * If CC is enabled, *new* connections and services may try additional routes to the Signal
+   * servers. Existing connections and services will continue with the setting they were created
+   * with. (In particular, changing this setting will not affect any existing
+   * {@link ChatConnection ChatConnections}.)
+   *
+   * CC is off by default.
+   */
+  public setCensorshipCircumventionEnabled(enabled: boolean): void {
+    Native.ConnectionManager_set_censorship_circumvention_enabled(
+      this._connectionManager,
+      enabled
     );
   }
 
   /**
    * Sets the proxy host to be used for all new connections (until overridden).
    *
-   * Sets a domain name and port to be used to proxy all new outgoing
-   * connections. The proxy can be overridden by calling this method again or
-   * unset by calling {@link #clearProxy}.
+   * Sets a server to be used to proxy all new outgoing connections. The proxy can be overridden by
+   * calling this method again or unset by calling {@link #clearProxy}. Omitting the `port` means
+   * the default port for the scheme will be used.
+   *
+   * To specify a Signal transparent TLS proxy, use {@link SIGNAL_TLS_PROXY_SCHEME}, or the
+   * overload that takes a separate domain and port number.
+   *
+   * Throws if the scheme is unsupported or if the provided parameters are invalid for that scheme
+   * (e.g. Signal TLS proxies don't support authentication)
+   */
+  setProxy(options: Readonly<ProxyOptions>): void;
+  /**
+   * Sets the Signal TLS proxy host to be used for all new connections (until overridden).
+   *
+   * Sets a domain name and port to be used to proxy all new outgoing connections, using a Signal
+   * transparent TLS proxy. The proxy can be overridden by calling this method again or unset by
+   * calling {@link #clearProxy}.
    *
    * Throws if the host or port is structurally invalid, such as a port that doesn't fit in u16.
    */
-  setProxy(host: string, port: number): void {
-    Native.ConnectionManager_set_proxy(this.connectionManager, host, port);
+  setProxy(host: string, port?: number): void;
+  setProxy(
+    hostOrOptions: string | Readonly<ProxyOptions>,
+    portOrNothing?: number
+  ): void {
+    if (typeof hostOrOptions === 'string') {
+      // Support <username>@<host> syntax to allow UNENCRYPTED_FOR_TESTING as a marker user.
+      // This is not a stable feature of the API and may go away in the future;
+      // the Rust layer will reject any other users anyway. But it's convenient for us.
+      const [before, after] = hostOrOptions.split('@', 2);
+      const [username, domain] = after ? [before, after] : [undefined, before];
+      hostOrOptions = {
+        scheme: SIGNAL_TLS_PROXY_SCHEME,
+        host: domain,
+        port: portOrNothing,
+        username,
+      };
+    }
+    const { scheme, host, port, username, password } = hostOrOptions;
+    try {
+      const proxyConfig = newNativeHandle(
+        Native.ConnectionProxyConfig_new(
+          scheme,
+          host,
+          // i32::MIN represents "no port provided"; we don't expect anyone to pass that manually.
+          port ?? -0x8000_0000,
+          username ?? null,
+          password ?? null
+        )
+      );
+      Native.ConnectionManager_set_proxy(this._connectionManager, proxyConfig);
+    } catch (e) {
+      this.setInvalidProxy();
+      throw e;
+    }
+  }
+
+  /**
+   * Like {@link #setProxy}, but parses the proxy options from a URL. See there for more
+   * information.
+   *
+   * Takes a string rather than a URL so that an *invalid* string can result in disabling
+   * connections until {@link #clearProxy} is called, consistent with other ways {@link #setProxy}
+   * might consider its parameters invalid.
+   *
+   * Throws if the URL contains unnecessary parts (like a query string), or if the resulting options
+   * are not supported.
+   */
+  setProxyFromUrl(urlString: string): void {
+    let options: ProxyOptions;
+    try {
+      options = Net.proxyOptionsFromUrl(urlString);
+    } catch (e) {
+      // Make sure we set an invalid proxy on error,
+      // so no connection can be made until the problem is fixed.
+      this.setInvalidProxy();
+      throw e;
+    }
+
+    this.setProxy(options);
+  }
+
+  /**
+   * Parses a proxy URL into an options object, suitable for passing to {@link #setProxy}.
+   *
+   * It is recommended not to call this directly. Instead, use {@link #setProxyFromUrl}, which will
+   * treat an invalid URL uniformly with one that is structurally valid but unsupported by
+   * libsignal.
+   *
+   * Throws if the URL is known to not be a valid proxy URL; however it's still possible the
+   * resulting options object cannot be used as a proxy.
+   */
+  static proxyOptionsFromUrl(urlString: string): ProxyOptions {
+    const url = new URL(urlString);
+
+    // Check all the parts of the URL.
+    // scheme://username:password@hostname:port/path?query#fragment
+    const scheme = url.protocol.slice(0, -1);
+    // This does not distinguish between "https://proxy.example" and "https://@proxy.example".
+    // This could be done by manually checking `url.href`.
+    // But until someone complains about it, let's not worry about it.
+    const username = url.username != '' ? url.username : undefined;
+    const password = url.password != '' ? url.password : undefined;
+
+    const host = url.hostname;
+    const port = url.port != '' ? Number.parseInt(url.port, 10) : undefined;
+
+    if (url.pathname != '' && url.pathname != '/') {
+      throw new Error('proxy URLs should not have path components');
+    }
+    if (url.search != '') {
+      throw new Error('proxy URLs should not have query components');
+    }
+    if (url.hash != '') {
+      throw new Error('proxy URLs should not have fragment components');
+    }
+
+    return { scheme, username, password, host, port };
+  }
+
+  /**
+   * Refuses to make any new connections until a new proxy configuration is set or
+   * {@link #clearProxy} is called.
+   *
+   * Existing connections will not be affected.
+   */
+  setInvalidProxy(): void {
+    Native.ConnectionManager_set_invalid_proxy(this._connectionManager);
   }
 
   /**
    * Ensures that future connections will be made directly, not through a proxy.
    *
-   * Clears any proxy configuration set via {@link #setProxy}. If none was set, calling this
-   * method is a no-op.
+   * Clears any proxy configuration set via {@link #setProxy} or {@link #setInvalidProxy}. If none
+   * was set, calling this method is a no-op.
    */
   clearProxy(): void {
-    Native.ConnectionManager_clear_proxy(this.connectionManager);
+    Native.ConnectionManager_clear_proxy(this._connectionManager);
+  }
+
+  /**
+   * Updates libsignal's remote configuration settings.
+   *
+   * The provided configuration map must conform to the following requirements:
+   * - Each key represents an enabled configuration and directly indicates that the setting is enabled.
+   * - Keys must have had the platform-specific prefix (e.g., `"desktop.libsignal."`) removed.
+   * - Entries explicitly disabled by the server must not appear in the map.
+   * - Values originally set to `null` by the server must be represented as empty strings.
+   * - Values should otherwise maintain the same format as they are returned by the server.
+   *
+   * These constraints ensure configurations passed to libsignal precisely reflect enabled
+   * server-provided settings without ambiguity.
+   *
+   * Only new connections made *after* this call will use the new remote config settings.
+   * Existing connections are not affected.
+   *
+   * @deprecated Calling without buildVariant is deprecated. Please explicitly specify BuildVariant.Production or BuildVariant.Beta.
+   * @param remoteConfig A map containing preprocessed libsignal configuration keys and their associated values.
+   */
+  setRemoteConfig(
+    remoteConfig: ReadonlyMap<(typeof REMOTE_CONFIG_KEYS)[number], string>
+  ): void;
+  /**
+   * Updates libsignal's remote configuration settings.
+   *
+   * The provided configuration map must conform to the following requirements:
+   * - Each key represents an enabled configuration and directly indicates that the setting is enabled.
+   * - Keys must have had the platform-specific prefix (e.g., `"desktop.libsignal."`) removed.
+   * - Entries explicitly disabled by the server must not appear in the map.
+   * - Values originally set to `null` by the server must be represented as empty strings.
+   * - Values should otherwise maintain the same format as they are returned by the server.
+   *
+   * These constraints ensure configurations passed to libsignal precisely reflect enabled
+   * server-provided settings without ambiguity.
+   *
+   * Only new connections made *after* this call will use the new remote config settings.
+   * Existing connections are not affected.
+   *
+   * @param remoteConfig A map containing preprocessed libsignal configuration keys and their associated values.
+   * @param buildVariant The build variant (BuildVariant.Production or BuildVariant.Beta) that determines which remote config keys to use.
+   */
+  setRemoteConfig(
+    remoteConfig: ReadonlyMap<string, string>,
+    buildVariant: BuildVariant
+  ): void;
+  setRemoteConfig(
+    remoteConfig: ReadonlyMap<string, string>,
+    buildVariant: BuildVariant = BuildVariant.Production
+  ): void {
+    Native.ConnectionManager_set_remote_config(
+      this._connectionManager,
+      new BridgedStringMap(remoteConfig),
+      buildVariant
+    );
+  }
+
+  /**
+   * Notifies libsignal that the network has changed.
+   *
+   * This will lead to, e.g. caches being cleared and cooldowns being reset.
+   */
+  onNetworkChange(): void {
+    Native.ConnectionManager_on_network_change(this._connectionManager);
   }
 
   async cdsiLookup(
-    { username, password }: Readonly<ServiceAuth>,
-    {
-      e164s,
-      acisAndAccessKeys,
-      returnAcisWithoutUaks,
-      abortSignal,
-    }: ReadonlyDeep<CDSRequestOptionsType>
+    auth: Readonly<ServiceAuth>,
+    options: ReadonlyDeep<CDSRequestOptionsType>
   ): Promise<CDSResponseType<string, string>> {
-    const request = newNativeHandle(Native.LookupRequest_new());
-    e164s.forEach((e164) => {
-      Native.LookupRequest_addE164(request, e164);
-    });
-
-    acisAndAccessKeys.forEach(({ aci: aciStr, accessKey: accessKeyStr }) => {
-      Native.LookupRequest_addAciAndAccessKey(
-        request,
-        Aci.parseFromServiceIdString(aciStr).getServiceIdFixedWidthBinary(),
-        Buffer.from(accessKeyStr, 'base64')
-      );
-    });
-
-    Native.LookupRequest_setReturnAcisWithoutUaks(
-      request,
-      returnAcisWithoutUaks
-    );
-
-    const lookup = await this.asyncContext.makeCancellable(
-      abortSignal,
-      Native.CdsiLookup_new(
-        this.asyncContext,
-        this.connectionManager,
-        username,
-        password,
-        request
-      )
-    );
-    return await this.asyncContext.makeCancellable(
-      abortSignal,
-      Native.CdsiLookup_complete(this.asyncContext, newNativeHandle(lookup))
+    return cdsiLookup(
+      {
+        asyncContext: this.asyncContext,
+        connectionManager: this._connectionManager,
+      },
+      auth,
+      options
     );
   }
-}
-
-/**
- * This interface provides functionality for communicating with SVR3
- *
- * Its instance can be obtained from an {@link Net#svr3} property
- * of the {@link Net} class.
- *
- * Example usage:
- *
- * @example
- * ```ts
- * import { Environment, Net } from '../net';
- * // Obtain an instance
- * const SVR3 = new Net(Environment.Staging).svr3;
- * // Instantiate ServiceAuth with the username and password obtained from the Chat Server.
- * const auth = { username: USERNAME, password: ENCLAVE_PASSWORD };
- * // Store a value in SVR3. Here 10 is the number of permitted restore attempts.
- * const shareSet = await SVR3.backup(SECRET_TO_BE_STORED, PASSWORD, 10, auth);
- * const restoredSecret = await SVR3.restore( PASSWORD, shareSet, auth);
- * ```
- */
-export interface Svr3Client {
-  /**
-   * Backup a secret to SVR3.
-   *
-   * Error messages are log-safe and do not contain any sensitive data.
-   *
-   * @param what - The secret to be stored. Must be 32 bytes long.
-   * @param password - User-provided password that will be used to derive the
-   * encryption key for the secret.
-   * @param maxTries - Number of times the secret will be allowed to be guessed.
-   * Each call to {@link Svr3Client#restore} that has reached the server will
-   * decrement the counter. Must be positive.
-   * @param auth - An instance of {@link ServiceAuth} containing the username
-   * and password obtained from the Chat Server. The password is an OTP which is
-   * generally good for about 15 minutes, therefore it can be reused for the
-   * subsequent calls to either backup or restore that are not too far apart in
-   * time.
-   * @returns A `Promise` which--when awaited--will return a byte array with a
-   * serialized masked share set. It is supposed to be an opaque blob for the
-   * clients and therefore no assumptions should be made about its contents.
-   * This byte array should be stored by the clients and used to restore the
-   * secret along with the password. Please note that masked share set does not
-   * have to be treated as secret.
-   *
-   * The returned `Promise` can also fail due to the network issues (including a
-   * connection timeout), problems establishing the Noise connection to the
-   * enclaves, or invalid arguments' values. {@link IoError} errors can, in
-   * general, be retried, although there is already a retry-with-backoff
-   * mechanism inside libsignal used to connect to the SVR3 servers. Other
-   * exceptions are caused by the bad input or data missing on the server. They
-   * are therefore non-actionable and are guaranteed to be thrown again when
-   * retried.
-   */
-  backup(
-    what: Buffer,
-    password: string,
-    maxTries: number,
-    auth: Readonly<ServiceAuth>,
-    options?: { abortSignal?: AbortSignal }
-  ): Promise<Buffer>;
 
   /**
-   * Restore a secret from SVR3.
+   * Get the SVR-B (Secure Value Recovery for Backups) service for this network instance.
    *
-   * Error messages are log-safe and do not contain any sensitive data.
+   * SVR-B provides forward secrecy for Signal backups, ensuring that even if the user's
+   * Account Entropy Pool or Backup Key is compromised, the attacker cannot
+   * compromise all past backups. This is achieved by storing the forward
+   * secrecy token in a secure enclave inside the SVR-B server, which provably
+   * attests that it only stores a single token at a time for each user.
    *
-   * @param password - User-provided password that will be used to derive the
-   * decryption key for the secret.
-   * @param shareSet - a serialized masked share set returned by a call to
-   * {@link Svr3Client#backup}.
-   * @param auth - An instance of {@link ServiceAuth} containing the username
-   * and password obtained from the Chat Server. The password is an OTP which is
-   * generally good for about 15 minutes, therefore it can be reused for the
-   * subsequent calls to either backup or restore that are not too far apart in
-   * time.
-   * @returns A `Promise` which--when awaited--will return a
-   * {@link RestoredSecret} object, containing the restored secret.
-   *
-   * The returned `Promise` can also fail due to the network issues (including
-   * the connection timeout), problems establishing the Noise connection to the
-   * enclaves, or invalid arguments' values. {@link IoError} errors can, in
-   * general, be retried, although there is already a retry-with-backoff
-   * mechanism inside libsignal used to connect to the SVR3 servers. Other
-   * exceptions are caused by the bad input or data missing on the server. They
-   * are therefore non-actionable and are guaranteed to be thrown again when
-   * retried.
-   *
-   * - {@link SvrDataMissingError} is returned when the maximum restore attempts
-   * number has been exceeded or if the value has never been backed up.
-   * - {@link SvrRestoreFailedError} is returned when the combination of the
-   * password and masked share set does not result in successful restoration
-   * of the secret.
-   * - {@link SvrRequestFailedError} is returned when the de-serialization of a
-   * masked share set fails, or when the server requests fail for reasons
-   * other than "maximum attempts exceeded".
+   * @param auth The authentication credentials to use when connecting to the SVR-B server.
+   * @returns An SvrB service instance configured for this network environment
+   * @see {@link SvrB}
    */
-  restore(
-    password: string,
-    shareSet: Buffer,
-    auth: Readonly<ServiceAuth>,
-    options?: { abortSignal?: AbortSignal }
-  ): Promise<RestoredSecret>;
-
-  /**
-   * Remove a value stored in SVR3.
-   *
-   * This method will succeed even if the data has never been backed up in the
-   * first place.
-   *
-   * Error messages are log-safe and do not contain any sensitive data.
-   *
-   * @param auth - An instance of {@link ServiceAuth} containing the username
-   * and password obtained from the Chat Server. The password is an OTP which is
-   * generally good for about 15 minutes, therefore it can be reused for the
-   * subsequent calls to either backup or restore that are not too far apart in
-   * time.
-   * @returns A `Promise` successful completion of which will mean the data has
-   * been removed.
-   *
-   * The returned `Promise` can also fail due to the network issues (including
-   * the connection timeout), problems establishing the Noise connection to the
-   * enclaves, or invalid arguments' values. {@link IoError} errors can, in
-   * general, be retried, although there is already a retry-with-backoff
-   * mechanism inside libsignal used to connect to the SVR3 servers. Other
-   * exceptions are caused by the bad input or data missing on the server. They
-   * are therefore non-actionable and are guaranteed to be thrown again when
-   * retried.
-   */
-  remove(
-    auth: Readonly<ServiceAuth>,
-    options?: { abortSignal?: AbortSignal }
-  ): Promise<void>;
-}
-
-/**
- * A simple data class containing the secret restored from SVR3 as well as the
- * number of restore attempts remaining.
- */
-export class RestoredSecret {
-  readonly triesRemaining: number;
-  readonly value: Buffer;
-
-  constructor(serialized: Buffer) {
-    this.triesRemaining = serialized.readInt32BE();
-    this.value = serialized.subarray(4);
-  }
-}
-
-class Svr3ClientImpl implements Svr3Client {
-  constructor(
-    private readonly asyncContext: TokioAsyncContext,
-    private readonly connectionManager: ConnectionManager
-  ) {}
-
-  async backup(
-    what: Buffer,
-    password: string,
-    maxTries: number,
-    auth: Readonly<ServiceAuth>,
-    options?: { abortSignal?: AbortSignal }
-  ): Promise<Buffer> {
-    return this.asyncContext.makeCancellable(
-      options?.abortSignal,
-      Native.Svr3Backup(
-        this.asyncContext,
-        this.connectionManager,
-        what,
-        password,
-        maxTries,
-        auth.username,
-        auth.password
-      )
-    );
-  }
-
-  async restore(
-    password: string,
-    shareSet: Buffer,
-    auth: Readonly<ServiceAuth>,
-    options?: { abortSignal?: AbortSignal }
-  ): Promise<RestoredSecret> {
-    const serialized = await this.asyncContext.makeCancellable(
-      options?.abortSignal,
-      Native.Svr3Restore(
-        this.asyncContext,
-        this.connectionManager,
-        password,
-        shareSet,
-        auth.username,
-        auth.password
-      )
-    );
-    return new RestoredSecret(serialized);
-  }
-  async remove(
-    auth: Readonly<ServiceAuth>,
-    options?: { abortSignal?: AbortSignal }
-  ): Promise<void> {
-    return this.asyncContext.makeCancellable(
-      options?.abortSignal,
-      Native.Svr3Remove(
-        this.asyncContext,
-        this.connectionManager,
-        auth.username,
-        auth.password
-      )
-    );
+  svrB(auth: Readonly<ServiceAuth>): SvrB {
+    const env = this.options.localTestServer
+      ? Environment.Staging
+      : this.options.env;
+    return new SvrB(this.asyncContext, this._connectionManager, auth, env);
   }
 }

@@ -11,18 +11,27 @@
 # You can use the `cargo tree` command below to see where they come from,
 # and then document them here.
 #
-# jni: v0.19 is used by rustls-platform-verifier on Android, v0.21 by us
-# pqcrypto-kyber: v0.7 is what we shipped PQXDH on, v0.8 contains the NIST standard version
+# thiserror: minimal and highly inlinable, most of the code is synthesized at the use site
+# rand_core, getrandom: waiting to update all the RustCrypto crates together
+# libcrux-sha3: v0.0.4 is referenced by hpke-rs, but only needed if you use X-Wing KEM
 EXPECTED="
-jni v0.19.0
-jni v0.21.1
-pqcrypto-kyber v0.7.9
-pqcrypto-kyber v0.8.1"
+getrandom v0.2.16
+getrandom v0.3.4
+libcrux-platform v0.0.2
+libcrux-platform v0.0.3
+libcrux-sha3 v0.0.4
+libcrux-sha3 v0.0.5
+rand_core v0.6.4
+rand_core v0.9.3
+thiserror v1.0.69
+thiserror v2.0.17"
 
 check_cargo_tree() {
     # Only check the mobile targets, where we care most about code size.
-    cargo tree --quiet --duplicates --edges normal,no-proc-macro \
-        --workspace --all-features --locked \
+    cargo tree \
+        -p libsignal-node -p libsignal-jni -p libsignal-ffi \
+        --quiet --duplicates --edges normal,no-proc-macro \
+        --all-features --locked \
         --target aarch64-apple-ios \
         --target armv7-linux-androideabi \
         --target aarch64-linux-android \

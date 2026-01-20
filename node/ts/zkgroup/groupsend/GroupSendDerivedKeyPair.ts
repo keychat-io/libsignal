@@ -3,12 +3,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import ByteArray from '../internal/ByteArray';
-import * as Native from '../../../Native';
-import ServerSecretParams from '../ServerSecretParams';
+import ByteArray from '../internal/ByteArray.js';
+import * as Native from '../../Native.js';
+import ServerSecretParams from '../ServerSecretParams.js';
 
 // For docs
-import type GroupSendEndorsementsResponse from './GroupSendEndorsementsResponse';
+import type GroupSendEndorsementsResponse from './GroupSendEndorsementsResponse.js';
 
 /**
  * The key pair used to issue and verify group send endorsements.
@@ -22,7 +22,7 @@ import type GroupSendEndorsementsResponse from './GroupSendEndorsementsResponse'
  * @see {@link GroupSendFullToken#verify}
  */
 export default class GroupSendDerivedKeyPair extends ByteArray {
-  constructor(contents: Buffer) {
+  constructor(contents: Uint8Array) {
     super(contents, Native.GroupSendDerivedKeyPair_CheckValidContents);
   }
 

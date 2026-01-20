@@ -66,21 +66,24 @@ extension LibsignalLogger {
     public func setUpLibsignalLogging(level: LibsignalLogLevel) {
         let bridge = LoggerBridge(logger: self)
         let opaqueBridge = Unmanaged.passRetained(bridge)
-        let success = signal_init_logger(level.asFFI, SignalFfiLogger(
-            ctx: opaqueBridge.toOpaque(),
-            log: { ctx, _, ffiLevel, file, line, message in
-                let bridge: LoggerBridge = Unmanaged.fromOpaque(ctx!).takeUnretainedValue()
-                // Unknown log levels might have personal info in them, so map them to something low.
-                let level = LibsignalLogLevel(ffiLevel) ?? .debug
-                "".withCString { emptyStringPtr in
-                    bridge.logger.log(level: level, file: file, line: line, message: message ?? emptyStringPtr)
+        let success = signal_init_logger(
+            level.asFFI,
+            SignalFfiLogger(
+                ctx: opaqueBridge.toOpaque(),
+                log: { ctx, ffiLevel, file, line, message in
+                    let bridge: LoggerBridge = Unmanaged.fromOpaque(ctx!).takeUnretainedValue()
+                    // Unknown log levels might have personal info in them, so map them to something low.
+                    let level = LibsignalLogLevel(ffiLevel) ?? .debug
+                    "".withCString { emptyStringPtr in
+                        bridge.logger.log(level: level, file: file, line: line, message: message ?? emptyStringPtr)
+                    }
+                },
+                flush: { ctx in
+                    let bridge: LoggerBridge = Unmanaged.fromOpaque(ctx!).takeUnretainedValue()
+                    bridge.logger.flush()
                 }
-            },
-            flush: { ctx in
-                let bridge: LoggerBridge = Unmanaged.fromOpaque(ctx!).takeUnretainedValue()
-                bridge.logger.flush()
-            }
-        ))
+            )
+        )
         if success {
             // We save this for use within the Swift code as well,
             // but only if it was registered as the Rust logger successfully.
@@ -99,8 +102,8 @@ internal class LoggerBridge {
         self.logger = logger
     }
 
-    private static var globalLoggerLock = NSLock()
-    private static var _globalLogger: LoggerBridge? = nil
+    private static let globalLoggerLock = NSLock()
+    private nonisolated(unsafe) static var _globalLogger: LoggerBridge? = nil
 
     internal fileprivate(set) static var shared: LoggerBridge? {
         // Ideally we would use NSLock.withLock here, but that's not available on Linux,

@@ -3,25 +3,30 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+use std::hint::black_box;
 use std::time::SystemTime;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures_util::FutureExt;
 use libsignal_protocol::*;
 use rand::rngs::OsRng;
-use rand::Rng;
+use rand::{Rng, TryRngCore as _};
 use uuid::Uuid;
 
 #[path = "../tests/support/mod.rs"]
 mod support;
 
 pub fn v1(c: &mut Criterion) {
-    let mut rng = OsRng;
+    let mut rng = OsRng.unwrap_err();
 
-    let alice_address =
-        ProtocolAddress::new("9d0652a3-dcc3-4d11-975f-74d61598733f".to_owned(), 1.into());
-    let bob_address =
-        ProtocolAddress::new("796abedb-ca4e-4f18-8803-1fde5b921f9f".to_owned(), 1.into());
+    let alice_address = ProtocolAddress::new(
+        "9d0652a3-dcc3-4d11-975f-74d61598733f".to_owned(),
+        DeviceId::new(1).unwrap(),
+    );
+    let bob_address = ProtocolAddress::new(
+        "796abedb-ca4e-4f18-8803-1fde5b921f9f".to_owned(),
+        DeviceId::new(1).unwrap(),
+    );
 
     let mut alice_store = support::test_in_memory_protocol_store().expect("brand new store");
     let mut bob_store = support::test_in_memory_protocol_store().expect("brand new store");
@@ -80,18 +85,27 @@ pub fn v1(c: &mut Criterion) {
     .expect("valid");
 
     let mut encrypt_it = || {
-        sealed_sender_encrypt_from_usmc(&bob_address, &usmc, &alice_store.identity_store, &mut rng)
+        black_box(
+            sealed_sender_encrypt_from_usmc(
+                &bob_address,
+                &usmc,
+                &alice_store.identity_store,
+                &mut rng,
+            )
             .now_or_never()
             .expect("sync")
-            .expect("valid")
+            .expect("valid"),
+        )
     };
     let encrypted = encrypt_it();
 
     let mut decrypt_it = || {
-        sealed_sender_decrypt_to_usmc(&encrypted, &bob_store.identity_store)
-            .now_or_never()
-            .expect("sync")
-            .expect("valid")
+        black_box(
+            sealed_sender_decrypt_to_usmc(&encrypted, &bob_store.identity_store)
+                .now_or_never()
+                .expect("sync")
+                .expect("valid"),
+        )
     };
     assert_eq!(message, decrypt_it().contents().expect("valid"));
 
@@ -100,12 +114,16 @@ pub fn v1(c: &mut Criterion) {
 }
 
 pub fn v2(c: &mut Criterion) {
-    let mut rng = OsRng;
+    let mut rng = OsRng.unwrap_err();
 
-    let alice_address =
-        ProtocolAddress::new("9d0652a3-dcc3-4d11-975f-74d61598733f".to_owned(), 1.into());
-    let bob_address =
-        ProtocolAddress::new("796abedb-ca4e-4f18-8803-1fde5b921f9f".to_owned(), 1.into());
+    let alice_address = ProtocolAddress::new(
+        "9d0652a3-dcc3-4d11-975f-74d61598733f".to_owned(),
+        DeviceId::new(1).unwrap(),
+    );
+    let bob_address = ProtocolAddress::new(
+        "796abedb-ca4e-4f18-8803-1fde5b921f9f".to_owned(),
+        DeviceId::new(1).unwrap(),
+    );
 
     let mut alice_store = support::test_in_memory_protocol_store().expect("brand new store");
     let mut bob_store = support::test_in_memory_protocol_store().expect("brand new store");
@@ -164,20 +182,22 @@ pub fn v2(c: &mut Criterion) {
     .expect("valid");
 
     let mut encrypt_it = || {
-        sealed_sender_multi_recipient_encrypt(
-            &[&bob_address],
-            &alice_store
-                .session_store
-                .load_existing_sessions(&[&bob_address])
-                .expect("present"),
-            [],
-            &usmc,
-            &alice_store.identity_store,
-            &mut rng,
+        black_box(
+            sealed_sender_multi_recipient_encrypt(
+                &[&bob_address],
+                &alice_store
+                    .session_store
+                    .load_existing_sessions(&[&bob_address])
+                    .expect("present"),
+                [],
+                &usmc,
+                &alice_store.identity_store,
+                &mut rng,
+            )
+            .now_or_never()
+            .expect("sync")
+            .expect("valid"),
         )
-        .now_or_never()
-        .expect("sync")
-        .expect("valid")
     };
     let outgoing = encrypt_it();
 
@@ -186,20 +206,32 @@ pub fn v2(c: &mut Criterion) {
     assert_eq!(&incoming_recipient.service_id_string(), bob_address.name());
 
     let mut decrypt_it = || {
-        sealed_sender_decrypt_to_usmc(&incoming_message, &bob_store.identity_store)
-            .now_or_never()
-            .expect("sync")
-            .expect("valid")
+        black_box(
+            sealed_sender_decrypt_to_usmc(&incoming_message, &bob_store.identity_store)
+                .now_or_never()
+                .expect("sync")
+                .expect("valid"),
+        )
     };
     assert_eq!(message, decrypt_it().contents().expect("valid"));
 
     c.bench_function("v2/encrypt", |b| b.iter(&mut encrypt_it));
     c.bench_function("v2/decrypt", |b| b.iter(&mut decrypt_it));
 
+    // Use cfg!(debug_assertions) as a proxy for "no optimizations".
+    let recipient_counts: &[usize] = if cfg!(debug_assertions) {
+        &[50]
+    } else {
+        &[2, 5, 10, 100, 1000]
+    };
+
     // Fill out additional recipients.
     let mut recipients = vec![bob_address.clone()];
-    while recipients.len() < 1000 {
-        let next_address = ProtocolAddress::new(Uuid::from_bytes(rng.gen()).to_string(), 1.into());
+    while recipients.len() < *recipient_counts.last().unwrap() {
+        let next_address = ProtocolAddress::new(
+            Uuid::from_bytes(rng.random()).to_string(),
+            DeviceId::new(1).unwrap(),
+        );
 
         let mut next_store = support::test_in_memory_protocol_store().expect("brand new store");
 
@@ -224,7 +256,7 @@ pub fn v2(c: &mut Criterion) {
     }
 
     let mut group = c.benchmark_group("v2/encrypt/multi-recipient");
-    for recipient_count in [2, 5, 10, 100, 1000] {
+    for &recipient_count in recipient_counts {
         group.bench_with_input(
             BenchmarkId::from_parameter(recipient_count),
             &recipient_count,

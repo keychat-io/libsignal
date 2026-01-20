@@ -3,14 +3,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use boring::ec::EcKey;
-use boring::pkey::Public;
-use boring::stack::{Stack, Stackable};
-use boring::x509::crl::X509CRLRef;
-use boring::x509::store::X509StoreRef;
-use boring::x509::{X509StoreContext, X509};
-
 use std::time::SystemTime;
+
+use boring_signal::ec::EcKey;
+use boring_signal::pkey::Public;
+use boring_signal::stack::{Stack, Stackable};
+use boring_signal::x509::crl::X509CRLRef;
+use boring_signal::x509::store::X509StoreRef;
+use boring_signal::x509::{X509, X509StoreContext};
 
 use crate::error::ContextError;
 use crate::expireable::Expireable;
@@ -65,10 +65,9 @@ impl CertChain {
     /// # Arguments
     ///
     /// * `trust` An X509Store containing trusted certificates and CRLs. If CRLs
-    ///           are present the store should be configured to validate crls
+    ///   are present the store should be configured to validate crls
     /// * `crls`  Additional CRLs that are not trusted, and must be issued by
-    ///           a certificate in this certificate chain rooted in the trust
-    ///           store
+    ///   a certificate in this certificate chain rooted in the trust store
     ///
     pub fn validate_chain(&self, trust: &X509StoreRef, crls: &[&X509CRLRef]) -> Result<()> {
         let crl_stack = Self::stack(crls.iter().map(|&crl| crl.to_owned()))
@@ -85,7 +84,10 @@ impl CertChain {
             #[cfg(not(fuzzing))]
             return Err(Error::new(format!(
                 "invalid certificate: {:?}",
-                ctx.verify_result().unwrap_err()
+                match ctx.verify_result() {
+                    Ok(()) => boring_signal::x509::X509VerifyError::UNSPECIFIED,
+                    Err(e) => e,
+                }
             )));
         }
 
@@ -93,7 +95,7 @@ impl CertChain {
     }
 
     /// Converts the iterator into a stack, preserving the iterator's original order
-    fn stack<T, I>(ts: I) -> std::result::Result<Stack<T>, boring::error::ErrorStack>
+    fn stack<T, I>(ts: I) -> std::result::Result<Stack<T>, boring_signal::error::ErrorStack>
     where
         T: Stackable,
         I: IntoIterator<Item = T>,
@@ -137,13 +139,9 @@ impl CertChain {
 
 impl Expireable for CertChain {
     fn valid_at(&self, timestamp: SystemTime) -> bool {
-        let asn1_timestamp = crate::util::system_time_to_asn1_time(timestamp);
-
-        if asn1_timestamp.is_err() {
+        let Ok(asn1_timestamp) = crate::util::system_time_to_asn1_time(timestamp) else {
             return false;
-        }
-
-        let asn1_timestamp = asn1_timestamp.unwrap();
+        };
 
         self.certs.iter().all(|cert| -> bool {
             cert.not_before()
@@ -162,18 +160,19 @@ impl Expireable for CertChain {
 #[cfg(test)]
 /// Utilities for creating test certificates / crls
 pub mod testutil {
-    use super::CertChain;
-
-    use boring::asn1::{Asn1Integer, Asn1IntegerRef, Asn1Time};
-    use boring::bn::{BigNum, MsbOption};
-    use boring::ec::{EcGroup, EcKey};
-    use boring::hash::MessageDigest;
-    use boring::nid::Nid;
-    use boring::pkey::{PKey, Private};
-    use boring::x509::crl::{X509CRLBuilder, X509Revoked, X509CRL};
-    use boring::x509::extension::BasicConstraints;
-    use boring::x509::{X509Name, X509};
     use std::borrow::Borrow;
+
+    use boring_signal::asn1::{Asn1Integer, Asn1IntegerRef, Asn1Time};
+    use boring_signal::bn::{BigNum, MsbOption};
+    use boring_signal::ec::{EcGroup, EcKey};
+    use boring_signal::hash::MessageDigest;
+    use boring_signal::nid::Nid;
+    use boring_signal::pkey::{PKey, Private};
+    use boring_signal::x509::crl::{X509CRL, X509CRLBuilder, X509Revoked};
+    use boring_signal::x509::extension::BasicConstraints;
+    use boring_signal::x509::{X509, X509Name};
+
+    use super::CertChain;
 
     /// generate EC private key
     fn pkey() -> PKey<Private> {
@@ -309,14 +308,14 @@ pub mod testutil {
 
 #[cfg(test)]
 mod test {
+    use assert_matches::assert_matches;
+    use boring_signal::nid::Nid;
+    use boring_signal::x509::X509Ref;
+    use boring_signal::x509::store::{X509Store, X509StoreBuilder};
+    use boring_signal::x509::verify::X509VerifyFlags;
+
     use super::testutil::*;
     use super::*;
-
-    use assert_matches::assert_matches;
-    use boring::nid::Nid;
-    use boring::x509::store::{X509Store, X509StoreBuilder};
-    use boring::x509::verify::X509VerifyFlags;
-    use boring::x509::X509Ref;
 
     fn names(certs: &[X509]) -> Vec<String> {
         certs
@@ -384,14 +383,11 @@ mod test {
     fn trust_store(root: &X509Ref, crl: Option<&X509CRLRef>) -> X509Store {
         let mut store_bldr = X509StoreBuilder::new().expect("Could not allocate x509 store");
         if let Some(crl) = crl {
-            store_bldr
-                .param_mut()
-                .set_flags(
-                    X509VerifyFlags::CRL_CHECK
-                        | X509VerifyFlags::CRL_CHECK_ALL
-                        | X509VerifyFlags::X509_STRICT,
-                )
-                .unwrap();
+            store_bldr.param_mut().set_flags(
+                X509VerifyFlags::CRL_CHECK
+                    | X509VerifyFlags::CRL_CHECK_ALL
+                    | X509VerifyFlags::X509_STRICT,
+            );
             store_bldr.add_crl(crl.to_owned()).unwrap();
         }
         store_bldr.add_cert(root.to_owned()).unwrap();
@@ -425,9 +421,11 @@ mod test {
         let cert_chain = CertChain {
             certs: c.into_iter().map(|p| p.x509).collect(),
         };
-        assert!(cert_chain
-            .validate_chain(&trust, &[&intermediate_crl])
-            .is_err())
+        assert!(
+            cert_chain
+                .validate_chain(&trust, &[&intermediate_crl])
+                .is_err()
+        )
     }
 
     #[test]
@@ -439,9 +437,11 @@ mod test {
         let cert_chain = CertChain {
             certs: c.into_iter().map(|p| p.x509).collect(),
         };
-        assert!(cert_chain
-            .validate_chain(&trust, &[&intermediate_crl])
-            .is_err())
+        assert!(
+            cert_chain
+                .validate_chain(&trust, &[&intermediate_crl])
+                .is_err()
+        )
     }
 
     #[test]

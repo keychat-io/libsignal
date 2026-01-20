@@ -3,8 +3,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
-import { Aci, ServiceId } from '../../Address';
+
+import { Aci, ServiceId } from '../../Address.js';
 import {
   ClientZkGroupCipher,
   GroupMasterKey,
@@ -12,7 +14,7 @@ import {
   GroupSendDerivedKeyPair,
   GroupSendEndorsementsResponse,
   ServerSecretParams,
-} from '../../zkgroup';
+} from '../../zkgroup/index.js';
 
 const SECONDS_PER_DAY = 60 * 60 * 24;
 

@@ -5,18 +5,26 @@
 
 import SignalFfi
 
-public class ProtocolAddress: ClonableHandleOwner {
+public class ProtocolAddress: ClonableHandleOwner<SignalMutPointerProtocolAddress>, @unchecked Sendable {
+    /// Creates an address in the Signal protocol.
+    /// - Parameters:
+    ///   - name: the identifier for the recipient, usually a ``ServiceId``.
+    ///   - deviceId: the identifier for the device; must be in the range 1-127 inclusive
+    ///
+    /// - Throws: ``SignalError#invalidProtocolAddress(name:deviceId:message:)`` if the address is not valid.
     public convenience init(name: String, deviceId: UInt32) throws {
-        var handle: OpaquePointer?
-        try checkError(signal_address_new(
-            &handle,
-            name,
-            deviceId
-        ))
-        self.init(owned: handle!)
+        let handle = try invokeFnReturningValueByPointer(.init()) {
+            signal_address_new($0, name, deviceId)
+        }
+        self.init(owned: NonNull(handle)!)
     }
 
     /// Creates a ProtocolAddress using the **uppercase** string representation of a service ID, for backward compatibility.
+    /// - Parameters:
+    ///   - serviceId: the identifier for the recipient
+    ///   - deviceId: the identifier for the device; must be in the range 1-127 inclusive
+    ///
+    /// - Throws: ``SignalError#invalidProtocolAddress(name:deviceId:message:)`` if the address is not valid.
     public convenience init(_ serviceId: ServiceId, deviceId: UInt32) {
         do {
             try self.init(name: serviceId.serviceIdUppercaseString, deviceId: deviceId)
@@ -27,19 +35,24 @@ public class ProtocolAddress: ClonableHandleOwner {
         }
     }
 
-    override internal class func cloneNativeHandle(_ newHandle: inout OpaquePointer?, currentHandle: OpaquePointer?) -> SignalFfiErrorRef? {
+    override internal class func cloneNativeHandle(
+        _ newHandle: inout SignalMutPointerProtocolAddress,
+        currentHandle: SignalConstPointerProtocolAddress
+    ) -> SignalFfiErrorRef? {
         return signal_address_clone(&newHandle, currentHandle)
     }
 
-    override internal class func destroyNativeHandle(_ handle: OpaquePointer) -> SignalFfiErrorRef? {
-        return signal_address_destroy(handle)
+    override internal class func destroyNativeHandle(
+        _ handle: NonNull<SignalMutPointerProtocolAddress>
+    ) -> SignalFfiErrorRef? {
+        return signal_address_destroy(handle.pointer)
     }
 
     public var name: String {
         return withNativeHandle { nativeHandle in
             failOnError {
                 try invokeFnReturningString {
-                    signal_address_get_name($0, nativeHandle)
+                    signal_address_get_name($0, nativeHandle.const())
                 }
             }
         }
@@ -56,7 +69,7 @@ public class ProtocolAddress: ClonableHandleOwner {
         return withNativeHandle { nativeHandle in
             failOnError {
                 try invokeFnReturningInteger {
-                    signal_address_get_device_id($0, nativeHandle)
+                    signal_address_get_device_id($0, nativeHandle.const())
                 }
             }
         }
@@ -81,5 +94,27 @@ extension ProtocolAddress: Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(self.name)
         hasher.combine(self.deviceId)
+    }
+}
+
+extension SignalMutPointerProtocolAddress: SignalMutPointer {
+    public typealias ConstPointer = SignalConstPointerProtocolAddress
+
+    public init(untyped: OpaquePointer?) {
+        self.init(raw: untyped)
+    }
+
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+
+    public func const() -> Self.ConstPointer {
+        Self.ConstPointer(raw: self.raw)
+    }
+}
+
+extension SignalConstPointerProtocolAddress: SignalConstPointer {
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
     }
 }

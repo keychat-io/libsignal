@@ -4,10 +4,17 @@
 //
 
 use ::zkgroup;
+use backups::BackupCredentialType;
 use libsignal_bridge_macros::*;
+use libsignal_bridge_types::zkgroup::validate_serialization;
 use libsignal_protocol::{Aci, Pni, ServiceId};
-use partial_default::PartialDefault;
+use uuid::Uuid;
+pub(crate) use zkgroup::Timestamp;
 use zkgroup::auth::*;
+use zkgroup::backups::{
+    BackupAuthCredential, BackupAuthCredentialPresentation, BackupAuthCredentialRequest,
+    BackupAuthCredentialRequestContext, BackupAuthCredentialResponse, BackupLevel,
+};
 use zkgroup::call_links::*;
 use zkgroup::generic_server_params::*;
 use zkgroup::groups::*;
@@ -15,98 +22,28 @@ use zkgroup::profiles::*;
 use zkgroup::receipts::*;
 use zkgroup::*;
 
-use serde::Deserialize;
-
-use uuid::Uuid;
-use zkgroup::backups::{
-    BackupAuthCredential, BackupAuthCredentialPresentation, BackupAuthCredentialRequest,
-    BackupAuthCredentialRequestContext, BackupAuthCredentialResponse, BackupLevel,
-};
-
 use crate::support::*;
 use crate::*;
 
-pub(crate) use zkgroup::Timestamp;
+bridge_fixed_length_serializable_fns!(ExpiringProfileKeyCredential);
+bridge_fixed_length_serializable_fns!(ExpiringProfileKeyCredentialResponse);
+bridge_fixed_length_serializable_fns!(GroupMasterKey);
+bridge_fixed_length_serializable_fns!(GroupPublicParams);
+bridge_fixed_length_serializable_fns!(GroupSecretParams);
+bridge_fixed_length_serializable_fns!(ProfileKey);
+bridge_fixed_length_serializable_fns!(ProfileKeyCiphertext);
+bridge_fixed_length_serializable_fns!(ProfileKeyCommitment);
+bridge_fixed_length_serializable_fns!(ProfileKeyCredentialRequest);
+bridge_fixed_length_serializable_fns!(ProfileKeyCredentialRequestContext);
+bridge_fixed_length_serializable_fns!(ReceiptCredential);
+bridge_fixed_length_serializable_fns!(ReceiptCredentialPresentation);
+bridge_fixed_length_serializable_fns!(ReceiptCredentialRequest);
+bridge_fixed_length_serializable_fns!(ReceiptCredentialRequestContext);
+bridge_fixed_length_serializable_fns!(ReceiptCredentialResponse);
+bridge_fixed_length_serializable_fns!(UuidCiphertext);
 
-/// Checks that `bytes` can be deserialized as a `T` using our standard bincode settings.
-fn validate_serialization<'a, T: Deserialize<'a> + PartialDefault>(
-    bytes: &'a [u8],
-) -> Result<(), ZkGroupDeserializationFailure> {
-    zkgroup::deserialize::<T>(bytes).map(|_| ())
-}
-
-/// Bridges a ZKGroup serializable type via [`FixedLengthBincodeSerializable`].
-///
-/// `bridge_fixed_length_serializable!(FooBar)` generates
-/// - `impl FixedLengthBincodeSerializable for FooBar`, using `[u8; FOO_BAR_LEN]` as the associated
-///   array type.
-/// - `#[bridge_fn] fn FooBar_CheckValidContents`, which checks that the type can be deserialized.
-macro_rules! bridge_fixed_length_serializable {
-    ($typ:ident) => {
-        paste! {
-            // Declare a marker type for TypeScript, the same as bridge_handle.
-            // (This is harmless for the other bridges.)
-            #[doc = "ts: interface " $typ " { readonly __type: unique symbol; }"]
-            impl FixedLengthBincodeSerializable for $typ {
-                type Array = [u8; [<$typ:snake:upper _LEN>]];
-            }
-            #[bridge_fn]
-            fn [<$typ _CheckValidContents>](
-                buffer: &[u8]
-            ) -> Result<(), ZkGroupDeserializationFailure> {
-                if buffer.len() != <$typ as FixedLengthBincodeSerializable>::Array::LEN {
-                    return Err(ZkGroupDeserializationFailure::new::<$typ>())
-                }
-                validate_serialization::<$typ>(buffer)
-            }
-        }
-    };
-}
-
-/// Bridges a ZKGroup serializable type via [`FixedLengthBincodeSerializable`].
-///
-/// `bridge_serializable_as_handle!(FooBar)` generates
-/// - `#[bridge_fn] fn FooBar_Deserialize` for deserializing into a `FooBar`, and
-/// - `#[bridge_fn] fn FooBar_Serialize` for serializing a `FooBar` again.
-macro_rules! bridge_serializable_as_handle {
-    ($typ:ident) => {
-        bridge_handle!($typ, clone = false);
-        paste! {
-            #[bridge_fn]
-            fn [<$typ _Deserialize>](
-                buffer: &[u8]
-            ) -> Result<$typ, ZkGroupDeserializationFailure> {
-                zkgroup::deserialize(buffer)
-            }
-            #[bridge_fn]
-            fn [<$typ _Serialize>](
-                handle: & $typ,
-            ) -> Vec<u8> {
-                zkgroup::serialize(handle)
-            }
-        }
-    };
-}
-
-bridge_fixed_length_serializable!(ExpiringProfileKeyCredential);
-bridge_fixed_length_serializable!(ExpiringProfileKeyCredentialResponse);
-bridge_fixed_length_serializable!(GroupMasterKey);
-bridge_fixed_length_serializable!(GroupPublicParams);
-bridge_fixed_length_serializable!(GroupSecretParams);
-bridge_fixed_length_serializable!(ProfileKey);
-bridge_fixed_length_serializable!(ProfileKeyCiphertext);
-bridge_fixed_length_serializable!(ProfileKeyCommitment);
-bridge_fixed_length_serializable!(ProfileKeyCredentialRequest);
-bridge_fixed_length_serializable!(ProfileKeyCredentialRequestContext);
-bridge_fixed_length_serializable!(ReceiptCredential);
-bridge_fixed_length_serializable!(ReceiptCredentialPresentation);
-bridge_fixed_length_serializable!(ReceiptCredentialRequest);
-bridge_fixed_length_serializable!(ReceiptCredentialRequestContext);
-bridge_fixed_length_serializable!(ReceiptCredentialResponse);
-bridge_fixed_length_serializable!(UuidCiphertext);
-
-bridge_serializable_as_handle!(ServerPublicParams);
-bridge_serializable_as_handle!(ServerSecretParams);
+bridge_serializable_handle_fns!(ServerPublicParams);
+bridge_serializable_handle_fns!(ServerSecretParams);
 
 #[bridge_fn]
 fn ProfileKey_GetCommitment(
@@ -239,6 +176,11 @@ fn ServerSecretParams_SignDeterministic(
 }
 
 #[bridge_fn]
+fn ServerPublicParams_GetEndorsementPublicKey(params: &ServerPublicParams) -> Vec<u8> {
+    zkgroup::serialize(&params.get_endorsement_public_key())
+}
+
+#[bridge_fn]
 fn ServerPublicParams_ReceiveAuthCredentialWithPniAsServiceId(
     params: &ServerPublicParams,
     aci: Aci,
@@ -248,14 +190,12 @@ fn ServerPublicParams_ReceiveAuthCredentialWithPniAsServiceId(
 ) -> Result<Vec<u8>, ZkGroupVerificationFailure> {
     let response = AuthCredentialWithPniResponse::new(auth_credential_with_pni_response_bytes)
         .expect("previously validated");
-    Ok(zkgroup::serialize(
-        &params.receive_auth_credential_with_pni_as_service_id(
-            aci,
-            pni,
-            redemption_time,
-            response,
-        )?,
-    ))
+    Ok(zkgroup::serialize(&response.receive(
+        params,
+        aci,
+        pni,
+        redemption_time,
+    )?))
 }
 
 #[bridge_fn]
@@ -267,13 +207,11 @@ fn ServerPublicParams_CreateAuthCredentialWithPniPresentationDeterministic(
 ) -> Vec<u8> {
     let auth_credential =
         AuthCredentialWithPni::new(auth_credential_with_pni_bytes).expect("previously validated");
-    zkgroup::serialize(
-        &server_public_params.create_auth_credential_with_pni_presentation(
-            *randomness,
-            group_secret_params.into_inner(),
-            auth_credential,
-        ),
-    )
+    zkgroup::serialize(&auth_credential.present(
+        server_public_params,
+        &group_secret_params.into_inner(),
+        *randomness,
+    ))
 }
 
 #[bridge_fn]
@@ -355,24 +293,6 @@ fn ServerPublicParams_CreateReceiptCredentialPresentationDeterministic(
     server_public_params
         .create_receipt_credential_presentation(*randomness, &receipt_credential)
         .into()
-}
-
-#[bridge_fn]
-fn ServerSecretParams_IssueAuthCredentialWithPniAsServiceIdDeterministic(
-    server_secret_params: &ServerSecretParams,
-    randomness: &[u8; RANDOMNESS_LEN],
-    aci: Aci,
-    pni: Pni,
-    redemption_time: Timestamp,
-) -> Vec<u8> {
-    zkgroup::serialize(
-        &server_secret_params.issue_auth_credential_with_pni_as_service_id(
-            *randomness,
-            aci,
-            pni,
-            redemption_time,
-        ),
-    )
 }
 
 #[bridge_fn]
@@ -515,26 +435,16 @@ fn AuthCredentialPresentation_GetUuidCiphertext(
 ) -> Serialized<UuidCiphertext> {
     let presentation = AnyAuthCredentialPresentation::new(presentation_bytes)
         .expect("should have been parsed previously");
-    presentation.get_uuid_ciphertext().into()
+    presentation.get_aci_ciphertext().into()
 }
 
-#[bridge_fn(ffi = false)]
-fn AuthCredentialPresentation_GetPniCiphertext(presentation_bytes: &[u8]) -> Option<Vec<u8>> {
+#[bridge_fn]
+fn AuthCredentialPresentation_GetPniCiphertext(
+    presentation_bytes: &[u8],
+) -> Serialized<UuidCiphertext> {
     let presentation = AnyAuthCredentialPresentation::new(presentation_bytes)
         .expect("should have been parsed previously");
-    presentation
-        .get_pni_ciphertext()
-        .map(|ciphertext| zkgroup::serialize(&ciphertext))
-}
-
-#[bridge_fn(jni = false, node = false)]
-fn AuthCredentialPresentation_GetPniCiphertextOrEmpty(presentation_bytes: &[u8]) -> Vec<u8> {
-    let presentation = AnyAuthCredentialPresentation::new(presentation_bytes)
-        .expect("should have been parsed previously");
-    presentation
-        .get_pni_ciphertext()
-        .map(|ciphertext| zkgroup::serialize(&ciphertext))
-        .unwrap_or_default()
+    presentation.get_pni_ciphertext().into()
 }
 
 #[bridge_fn]
@@ -702,6 +612,18 @@ fn CallLinkSecretParams_DecryptUserId(
         .expect("should have been parsed previously");
 
     params.decrypt_uid(user_id.into_inner())
+}
+
+#[bridge_fn]
+fn CallLinkSecretParams_EncryptUserId(
+    params_bytes: &[u8],
+    user_id: Aci,
+) -> Serialized<UuidCiphertext> {
+    let params = zkgroup::deserialize::<CallLinkSecretParams>(params_bytes)
+        .expect("should have been parsed previously");
+
+    let ciphertext = params.encrypt_uid(user_id);
+    ciphertext.into()
 }
 
 #[bridge_fn]
@@ -957,7 +879,9 @@ fn CallLinkAuthCredentialPresentation_GetUserId(
 
 #[bridge_fn]
 fn BackupAuthCredentialRequestContext_New(backup_key: &[u8; 32], uuid: Uuid) -> Vec<u8> {
-    let context = BackupAuthCredentialRequestContext::new(backup_key, &uuid);
+    let backup_key: libsignal_account_keys::BackupKey =
+        libsignal_account_keys::BackupKey(*backup_key);
+    let context = BackupAuthCredentialRequestContext::new(&backup_key, uuid.into());
     zkgroup::serialize(&context)
 }
 
@@ -989,6 +913,7 @@ fn BackupAuthCredentialRequest_IssueDeterministic(
     request_bytes: &[u8],
     redemption_time: Timestamp,
     backup_level: AsType<BackupLevel, u8>,
+    credential_type: AsType<BackupCredentialType, u8>,
     params_bytes: &[u8],
     randomness: &[u8; RANDOMNESS_LEN],
 ) -> Vec<u8> {
@@ -1000,6 +925,7 @@ fn BackupAuthCredentialRequest_IssueDeterministic(
     let response = request.issue(
         redemption_time,
         backup_level.into_inner(),
+        credential_type.into_inner(),
         &params,
         *randomness,
     );
@@ -1042,7 +968,7 @@ fn BackupAuthCredential_CheckValidContents(
 fn BackupAuthCredential_GetBackupId(credential_bytes: &[u8]) -> [u8; 16] {
     let credential = bincode::deserialize::<BackupAuthCredential>(credential_bytes)
         .expect("should have been parsed previously");
-    credential.backup_id()
+    credential.backup_id().0
 }
 
 #[bridge_fn]
@@ -1050,6 +976,13 @@ fn BackupAuthCredential_GetBackupLevel(credential_bytes: &[u8]) -> u8 {
     let credential = bincode::deserialize::<BackupAuthCredential>(credential_bytes)
         .expect("should have been parsed previously");
     credential.backup_level() as u8
+}
+
+#[bridge_fn]
+fn BackupAuthCredential_GetType(credential_bytes: &[u8]) -> u8 {
+    let credential = bincode::deserialize::<BackupAuthCredential>(credential_bytes)
+        .expect("should have been parsed previously");
+    credential.credential_type() as u8
 }
 
 #[bridge_fn]
@@ -1088,18 +1021,25 @@ fn BackupAuthCredentialPresentation_Verify(
     presentation.verify(now, &server_params)
 }
 
-#[bridge_fn(ffi = false, node = false)]
+#[bridge_fn(ffi = false)]
 fn BackupAuthCredentialPresentation_GetBackupId(presentation_bytes: &[u8]) -> [u8; 16] {
     let presentation = bincode::deserialize::<BackupAuthCredentialPresentation>(presentation_bytes)
         .expect("should have been parsed previously");
-    presentation.backup_id()
+    presentation.backup_id().0
 }
 
-#[bridge_fn(ffi = false, node = false)]
+#[bridge_fn(ffi = false)]
 fn BackupAuthCredentialPresentation_GetBackupLevel(presentation_bytes: &[u8]) -> u8 {
     let presentation = bincode::deserialize::<BackupAuthCredentialPresentation>(presentation_bytes)
         .expect("should have been parsed previously");
     presentation.backup_level() as u8
+}
+
+#[bridge_fn(ffi = false)]
+fn BackupAuthCredentialPresentation_GetType(presentation_bytes: &[u8]) -> u8 {
+    let presentation = bincode::deserialize::<BackupAuthCredentialPresentation>(presentation_bytes)
+        .expect("should have been parsed previously");
+    presentation.credential_type() as u8
 }
 
 #[bridge_fn]
@@ -1265,7 +1205,20 @@ fn GroupSendEndorsement_ToToken(
 ) -> Vec<u8> {
     let endorsement = zkgroup::deserialize::<GroupSendEndorsement>(endorsement)
         .expect("should have been parsed previously");
-    zkgroup::serialize(&endorsement.to_token(&group_params))
+    zkgroup::serialize(&endorsement.to_token(group_params.into_inner()))
+}
+
+#[bridge_fn]
+fn GroupSendEndorsement_CallLinkParams_ToToken(
+    endorsement: &[u8],
+    call_link_secret_params_serialized: &[u8],
+) -> Vec<u8> {
+    let call_link_params =
+        zkgroup::deserialize::<CallLinkSecretParams>(call_link_secret_params_serialized)
+            .expect("valid serialization");
+    let endorsement = zkgroup::deserialize::<GroupSendEndorsement>(endorsement)
+        .expect("should have been parsed previously");
+    zkgroup::serialize(&endorsement.to_token(call_link_params))
 }
 
 #[bridge_fn]

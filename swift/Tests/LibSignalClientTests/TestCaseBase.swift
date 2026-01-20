@@ -10,7 +10,8 @@ class TestCaseBase: XCTestCase {
     // Use a static stored property for one-time initialization.
     static let loggingInitialized: Bool = {
         struct LogToNSLog: LibsignalLogger {
-            func log(level: LibsignalLogLevel, file: UnsafePointer<CChar>?, line: UInt32, message: UnsafePointer<CChar>) {
+            func log(level: LibsignalLogLevel, file: UnsafePointer<CChar>?, line: UInt32, message: UnsafePointer<CChar>)
+            {
                 let abbreviation: String
                 switch level {
                 case .error: abbreviation = "E"
@@ -31,5 +32,12 @@ class TestCaseBase: XCTestCase {
 
     override class func setUp() {
         precondition(self.loggingInitialized)
+    }
+
+    internal func nonHermeticTest() throws {
+        let varName = "LIBSIGNAL_TESTING_RUN_NONHERMETIC_TESTS"
+        if ProcessInfo.processInfo.environment[varName] == nil {
+            throw XCTSkip("requires \(varName)")
+        }
     }
 }

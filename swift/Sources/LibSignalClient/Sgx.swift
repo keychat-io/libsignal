@@ -24,17 +24,19 @@ import SignalFfi
 /// to pass along.  When a message is received (as ciphertext), it is passed to Cds2Client.establishedRecv(),
 /// which decrypts and verifies it, passing the plaintext back to the client for processing.
 ///
-public class SgxClient: NativeHandleOwner {
-    override internal class func destroyNativeHandle(_ handle: OpaquePointer) -> SignalFfiErrorRef? {
-        return signal_sgx_client_state_destroy(handle)
+public class SgxClient: NativeHandleOwner<SignalMutPointerSgxClientState> {
+    override internal class func destroyNativeHandle(
+        _ handle: NonNull<SignalMutPointerSgxClientState>
+    ) -> SignalFfiErrorRef? {
+        return signal_sgx_client_state_destroy(handle.pointer)
     }
 
     /// Initial request to send to an SGX service, which begins post-attestation handshake.
-    public func initialRequest() -> [UInt8] {
+    public func initialRequest() -> Data {
         return withNativeHandle { nativeHandle in
             failOnError {
-                try invokeFnReturningArray {
-                    signal_sgx_client_state_initial_request($0, nativeHandle)
+                try invokeFnReturningData {
+                    signal_sgx_client_state_initial_request($0, nativeHandle.const())
                 }
             }
         }
@@ -50,10 +52,10 @@ public class SgxClient: NativeHandleOwner {
     }
 
     /// Called by client after completeHandshake has succeeded, to encrypt a message to send.
-    public func establishedSend<Bytes: ContiguousBytes>(_ plaintextToSend: Bytes) throws -> [UInt8] {
+    public func establishedSend<Bytes: ContiguousBytes>(_ plaintextToSend: Bytes) throws -> Data {
         return try withNativeHandle { nativeHandle in
             try plaintextToSend.withUnsafeBorrowedBuffer { buffer in
-                try invokeFnReturningArray {
+                try invokeFnReturningData {
                     signal_sgx_client_state_established_send($0, nativeHandle, buffer)
                 }
             }
@@ -61,13 +63,35 @@ public class SgxClient: NativeHandleOwner {
     }
 
     /// Called by client after completeHandshake has succeeded, to decrypt a received message.
-    public func establishedRecv<Bytes: ContiguousBytes>(_ receivedCiphertext: Bytes) throws -> [UInt8] {
+    public func establishedRecv<Bytes: ContiguousBytes>(_ receivedCiphertext: Bytes) throws -> Data {
         return try withNativeHandle { nativeHandle in
             try receivedCiphertext.withUnsafeBorrowedBuffer { buffer in
-                try invokeFnReturningArray {
+                try invokeFnReturningData {
                     signal_sgx_client_state_established_recv($0, nativeHandle, buffer)
                 }
             }
         }
+    }
+}
+
+extension SignalMutPointerSgxClientState: SignalMutPointer {
+    public typealias ConstPointer = SignalConstPointerSgxClientState
+
+    public init(untyped: OpaquePointer?) {
+        self.init(raw: untyped)
+    }
+
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+
+    public func const() -> Self.ConstPointer {
+        Self.ConstPointer(raw: self.raw)
+    }
+}
+
+extension SignalConstPointerSgxClientState: SignalConstPointer {
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
     }
 }
