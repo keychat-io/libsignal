@@ -10,7 +10,9 @@ import XCTest
 class IncrementalMacTests: TestCaseBase {
     private let TEST_KEY = Data(base64Encoded: "qDSBRX7+zGmtE0LiHZwCl/cd679ckwS0wbLkM8Gnj5g=")!
     private let TEST_INPUT = ["this is a test", " input to the incremental ", "mac stream"].map { Data($0.utf8) }
-    private let TEST_DIGEST = Array(Data(base64Encoded: "hIkvcGAOVJ+3KHlmep2WonPxRLaY/571p2BipWBhqQmIT22fQpGKnkdu1RjErI9xS9M/BFFSrgSYd/09Gw2yWg==")!)
+    private let TEST_DIGEST = Data(
+        base64Encoded: "hIkvcGAOVJ+3KHlmep2WonPxRLaY/571p2BipWBhqQmIT22fQpGKnkdu1RjErI9xS9M/BFFSrgSYd/09Gw2yWg=="
+    )!
     private let CHUNK_SIZE = SizeChoice.bytes(32)
 
     func testIncrementalDigestCreation() throws {
@@ -20,6 +22,16 @@ class IncrementalMacTests: TestCaseBase {
         }
         let digest = try mac.finalize()
         XCTAssertEqual(self.TEST_DIGEST, digest)
+    }
+
+    func testIncrementalDigestChunkSizeAbsolute() throws {
+        let mac = try IncrementalMacContext(key: TEST_KEY, chunkSize: CHUNK_SIZE)
+        XCTAssertEqual(32, mac.chunkSizeInBytes)
+    }
+
+    func testIncrementalDigestChunkSizeInferred() throws {
+        let mac = try IncrementalMacContext(key: TEST_KEY, chunkSize: .chunkOf(42))
+        XCTAssertEqual(65536, mac.chunkSizeInBytes)
     }
 
     func testIncrementalValidationSuccess() throws {
@@ -61,4 +73,15 @@ class IncrementalMacTests: TestCaseBase {
             XCTFail("Unexpected error thrown")
         }
     }
+
+    func testValidationInvalidDigest() throws {
+        do {
+            _ = try ValidatingMacContext(key: TEST_KEY, chunkSize: CHUNK_SIZE, expectingDigest: [0])
+            XCTFail("Should have failed")
+        } catch SignalError.verificationFailed {
+        } catch {
+            XCTFail("Unexpected error thrown")
+        }
+    }
+
 }

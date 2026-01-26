@@ -6,8 +6,8 @@
 use std::fs::File;
 
 use arrayvec::ArrayVec;
-use futures::io::{AllowStdIo, Cursor};
 use futures::AsyncRead;
+use futures::io::{AllowStdIo, Cursor};
 use mediasan_common::{AsyncSkip, SeekSkipAdapter};
 
 /// Provider of an [`AsyncRead`] and [`AsyncSkip`] reader.
@@ -68,11 +68,8 @@ impl<R: AsyncRead + AsyncSkip, const N: usize> ReaderFactory for LimitedReaderFa
     type Reader = R;
 
     fn make_reader(&mut self) -> futures::io::Result<Self::Reader> {
-        self.0.pop().ok_or_else(|| {
-            futures::io::Error::new(
-                futures::io::ErrorKind::Other,
-                "pre-allocated streams exhausted",
-            )
-        })
+        self.0
+            .pop()
+            .ok_or_else(|| futures::io::Error::other("pre-allocated streams exhausted"))
     }
 }

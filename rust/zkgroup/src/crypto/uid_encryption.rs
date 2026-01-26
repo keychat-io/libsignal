@@ -5,21 +5,21 @@
 
 #![allow(non_snake_case)]
 
-use crate::common::errors::*;
-use crate::common::sho::*;
-use crate::crypto::uid_struct;
+use std::sync::LazyLock;
 
-use curve25519_dalek::ristretto::RistrettoPoint;
-use lazy_static::lazy_static;
+use curve25519_dalek_signal::ristretto::RistrettoPoint;
 use partial_default::PartialDefault;
 use serde::{Deserialize, Serialize};
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 use zkcredential::attributes::Attribute;
 
-lazy_static! {
-    static ref SYSTEM_PARAMS: SystemParams =
-        crate::deserialize::<SystemParams>(&SystemParams::SYSTEM_HARDCODED).unwrap();
-}
+use crate::common::errors::*;
+use crate::common::sho::*;
+use crate::crypto::uid_struct;
+
+static SYSTEM_PARAMS: LazyLock<SystemParams> = LazyLock::new(|| {
+    crate::deserialize(&SystemParams::SYSTEM_HARDCODED).expect("valid hardcoded params")
+});
 
 #[derive(Copy, Clone, PartialEq, Eq, Serialize, Deserialize, PartialDefault)]
 pub struct SystemParams {
@@ -91,8 +91,9 @@ impl UidEncryptionDomain {
                 ];
                 let decoded_aci = &decoded_service_ids[0];
                 let decoded_pni = &decoded_service_ids[1];
-                let aci_M1 = uid_struct::UidStruct::calc_M1(*decoded_aci);
-                let pni_M1 = uid_struct::UidStruct::calc_M1(*decoded_pni);
+                let sho_seed = uid_struct::UidStruct::seed_M1();
+                let aci_M1 = uid_struct::UidStruct::calc_M1(sho_seed.clone(), *decoded_aci);
+                let pni_M1 = uid_struct::UidStruct::calc_M1(sho_seed, *decoded_pni);
                 debug_assert!(aci_M1 != pni_M1);
                 let decrypted_M1 = key_pair.a1.invert() * ciphertext.as_points()[0];
                 let mut index = u8::MAX;

@@ -6,12 +6,16 @@
 use partial_default::PartialDefault;
 use serde::{Deserialize, Serialize};
 
+use crate::common::serialization::ReservedByte;
 use crate::crypto::receipt_struct::ReceiptStruct;
-use crate::{crypto, ReceiptLevel, ReceiptSerialBytes, ReservedBytes, Timestamp};
+use crate::{ReceiptLevel, ReceiptSerialBytes, Timestamp, crypto};
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+// Note that this type appears in gift badge messages, and thus in backups.
+// Therefore it must be possible to at least deserialize any past versions of it,
+// though they don't have to still be considered valid.
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct ReceiptCredentialPresentation {
-    pub(crate) reserved: ReservedBytes,
+    pub(crate) reserved: ReservedByte,
     pub(crate) proof: crypto::proofs::ReceiptCredentialPresentationProof,
     pub(crate) receipt_expiration_time: Timestamp,
     pub(crate) receipt_level: ReceiptLevel,

@@ -42,12 +42,20 @@
 //! that covers all endorsements issued together. Tokens can then be lazily generated on an
 //! individual basis from the validated endorsements.
 //!
+//! Note that the "combine" operation (and its reverse, "remove") imply that the client has a
+//! limited ability to synthesize endorsements that the issuing server never sees---for instance,
+//! given an endorsement for attribute point P, the client can synthesize an endorsement for 2P, 3P,
+//! -P, etc. Because of this, it's critical that the points used for the hidden attributes not be
+//! algebraically related (a hash is recommended).
+//!
 //! This model can be extended to endorsements over *tuples* of attribute points as long as the
 //! client uses only a single blinding key, but that has not been implemented here.
 //!
 //! [3HashSDHI]: https://eprint.iacr.org/2021/864
 //! [PrivacyPass]: https://privacypass.github.io
 //! [HMAC]: https://en.wikipedia.org/wiki/HMAC
+
+use std::fmt::Debug;
 
 use curve25519_dalek::ristretto::CompressedRistretto;
 use curve25519_dalek::traits::{MultiscalarMul, VartimeMultiscalarMul};
@@ -59,7 +67,7 @@ use sha2::Digest;
 use subtle::ConstantTimeEq;
 
 use crate::sho::ShoExt;
-use crate::{VerificationFailure, RANDOMNESS_LEN};
+use crate::{RANDOMNESS_LEN, VerificationFailure};
 
 /// A server's secret key for issuing and verifying endorsements.
 ///
@@ -154,12 +162,20 @@ impl ClientDecryptionKey {
 }
 
 /// A set of endorsements issued by a server, along with the proof of their validity.
-#[derive(Serialize, Deserialize, PartialDefault)]
-#[cfg_attr(test, derive(Clone))]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct EndorsementResponse {
     // Don't eagerly decompress these.
     R: Vec<CompressedRistretto>,
     proof: Vec<u8>,
+}
+
+impl Debug for EndorsementResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EndorsementResponse")
+            .field("R", &crate::PrintAsHex(&*self.R))
+            .field("proof", &crate::PrintAsHex(&*self.proof))
+            .finish()
+    }
 }
 
 /// An endorsement of a particular hidden attribute point.
@@ -169,9 +185,88 @@ pub struct EndorsementResponse {
 ///
 /// Endorsements may be persisted on the client, or may be eagerly converted to tokens using
 /// [`to_token`][Self::to_token].
-#[derive(Clone, Serialize, Deserialize, PartialDefault)]
-pub struct Endorsement {
-    R: RistrettoPoint,
+///
+/// `Storage` should be [`RistrettoPoint`] or [`CompressedRistretto`].
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct Endorsement<Storage = RistrettoPoint> {
+    R: Storage,
+}
+
+impl Debug for Endorsement<RistrettoPoint> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.compress().fmt(f)
+    }
+}
+
+impl Debug for Endorsement<CompressedRistretto> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endorsement")
+            .field("R", &crate::PrintAsHex(self.R.as_bytes().as_slice()))
+            .finish()
+    }
+}
+
+impl<R: ConstantTimeEq> PartialEq for Endorsement<R> {
+    fn eq(&self, other: &Endorsement<R>) -> bool {
+        self.R.ct_eq(&other.R).into()
+    }
+}
+
+impl Endorsement<CompressedRistretto> {
+    /// Attempts to decompress the endorsement.
+    ///
+    /// Produces [`VerificationFailure`] if the compressed storage isn't a valid representation of a
+    /// point.
+    ///
+    /// Deserializing an `Endorsement<RistrettoPoint>` is equivalent to deserializing an
+    /// `Endorsement<CompressedRistretto>` and then calling `decompress`.
+    pub fn decompress(self) -> Result<Endorsement<RistrettoPoint>, VerificationFailure> {
+        match self.R.decompress() {
+            Some(R) => Ok(Endorsement { R }),
+            None => Err(VerificationFailure),
+        }
+    }
+}
+
+impl Endorsement<RistrettoPoint> {
+    /// Compresses the endorsement for storage.
+    ///
+    /// Serializing an `Endorsement<RistrettoPoint>` is equivalent to calling `compress` and
+    /// serializing the resulting `Endorsement<CompressedRistretto>`.
+    pub fn compress(self) -> Endorsement<CompressedRistretto> {
+        Endorsement {
+            R: self.R.compress(),
+        }
+    }
+}
+
+/// The default endorsement is the "identity" of the `combine` and `remove` operations.
+impl<Storage: curve25519_dalek::traits::Identity> Default for Endorsement<Storage> {
+    fn default() -> Self {
+        // This could actually just be a synthesized Default, because the Default for both
+        // RistrettoPoint and CompressedRistretto is the identity point. But having an explicit impl
+        // provides a place to attach a doc comment, and using the Identity trait makes it extra
+        // clear what the expectation is.
+        Self {
+            R: Storage::identity(),
+        }
+    }
+}
+
+/// Endorsements as extracted from an [`EndorsementResponse`].
+///
+/// The [`receive`](EndorsementResponse::receive) process has to work with the endorsements in both
+/// compressed and decompressed forms, so it might as well provide both to the caller. The
+/// compressed form is appropriate for serialization (in fact it is essentially already serialized),
+/// while the decompressed form supports further operations. Depending on what a client wants to do
+/// with the endorsements, either or both could be useful.
+///
+/// The fields are public to support deconstruction one field at a time.
+#[allow(missing_docs)]
+#[derive(Clone)]
+pub struct ReceivedEndorsements {
+    pub compressed: Vec<Endorsement<CompressedRistretto>>,
+    pub decompressed: Vec<Endorsement>,
 }
 
 /// Enough randomness that someone can't *guess* a correct token, but as small as possible to avoid
@@ -279,7 +374,7 @@ impl EndorsementResponse {
         scalar_args.add("sk_prime", private_key.sk_prime);
         let proof = statement
             .prove(&scalar_args, &point_args, b"", &randomness)
-            .unwrap();
+            .expect("valid proof");
 
         EndorsementResponse { R, proof }
     }
@@ -308,16 +403,30 @@ impl EndorsementResponse {
         R: &[CompressedRistretto],
     ) -> Vec<Scalar> {
         debug_assert_eq!(E.len(), R.len());
-        let mut gen = poksho::ShoHmacSha256::new(
+
+        let mut hasher = poksho::ShoHmacSha256::new(
             b"Signal_ZKCredential_Endorsements_EndorsementResponse_ProofWeights_20240207",
         );
-        gen.absorb_and_ratchet(public_key.PK_prime.compress().as_bytes());
-        // Absorb the sum of input points rather than each one independently, to save on compress()
-        // and SHA operations.
-        gen.absorb_and_ratchet(E.iter().sum::<RistrettoPoint>().compress().as_bytes());
-        for R_i in R {
-            gen.absorb_and_ratchet(R_i.as_bytes());
+
+        // Here and in the following steps we only need to absorb, since (1) all
+        // inputs are equal length so we do not need ratcheting or standard
+        // length prefixes to prevent different series of from producing the
+        // same output (e.g. absorbing [1,2,3] then [4] gives same output as
+        // absorbing [1,2] then [3,4]). Furthermore we do not need to use the
+        // Sho's underlying secret until we squeeze out the random challenges.
+        hasher.absorb(public_key.PK_prime.compress().as_bytes());
+
+        // It is more efficient to double and compress than to compress individually, and the doubled values
+        // bind the prover to the E values just as much as compressing the E values directly would.
+        let compressed_double_Es = RistrettoPoint::double_and_compress_batch(E);
+
+        for E_i in compressed_double_Es {
+            hasher.absorb(E_i.as_bytes());
         }
+        for R_i in R {
+            hasher.absorb(R_i.as_bytes());
+        }
+        hasher.ratchet();
 
         // Deliberately generate scalars < 2^127 only, which we can multiply faster.
         // This still gives us 127-bit soundness according to Henry's analysis of RME (cited above).
@@ -325,7 +434,7 @@ impl EndorsementResponse {
         // We squeeze all of the scalar bytes at once so that we don't pay the cost of ratcheting
         // between each.
         const SMALL_SCALAR_BYTES: usize = 16;
-        let randomness = gen.squeeze_and_ratchet((E.len() - 1) * SMALL_SCALAR_BYTES);
+        let randomness = hasher.squeeze_and_ratchet((E.len() - 1) * SMALL_SCALAR_BYTES);
         randomness
             .chunks_exact(SMALL_SCALAR_BYTES)
             .map(|chunk| {
@@ -352,7 +461,7 @@ impl EndorsementResponse {
         self,
         hidden_attribute_points: impl IntoIterator<Item = RistrettoPoint>,
         server_public_key: &ServerDerivedPublicKey,
-    ) -> Result<Vec<Endorsement>, VerificationFailure> {
+    ) -> Result<ReceivedEndorsements, VerificationFailure> {
         let hidden_attribute_points = Vec::from_iter(hidden_attribute_points);
         if hidden_attribute_points.len() != self.R.len() {
             return Err(VerificationFailure);
@@ -361,7 +470,7 @@ impl EndorsementResponse {
         let weights_for_proof =
             Self::generate_weights_for_proof(server_public_key, &hidden_attribute_points, &self.R);
 
-        let decompress_or_default = |R_i: CompressedRistretto| {
+        let decompress_or_default = |R_i: &CompressedRistretto| {
             // If any R_i fails to decompress, substituting RistrettoPoint::default() will make the
             // proof verification below fail.
             R_i.decompress().unwrap_or_default()
@@ -371,9 +480,9 @@ impl EndorsementResponse {
             cfg_if::cfg_if! {
                 if #[cfg(feature = "rayon")] {
                     use rayon::prelude::*;
-                    self.R.into_par_iter().map(decompress_or_default).collect()
+                    self.R.par_iter().map(decompress_or_default).collect()
                 } else {
-                    self.R.into_iter().map(decompress_or_default).collect()
+                    self.R.iter().map(decompress_or_default).collect()
                 }
             }
         };
@@ -415,7 +524,14 @@ impl EndorsementResponse {
             .verify_proof(&self.proof, &point_args, b"")
             .map_err(|_| VerificationFailure)?;
 
-        Ok(R.into_iter().map(|R_i| Endorsement { R: R_i }).collect())
+        Ok(ReceivedEndorsements {
+            compressed: self
+                .R
+                .into_iter()
+                .map(|R_i| Endorsement { R: R_i })
+                .collect(),
+            decompressed: R.into_iter().map(|R_i| Endorsement { R: R_i }).collect(),
+        })
     }
 }
 
@@ -423,15 +539,64 @@ impl Endorsement {
     /// Combines several endorsements into one.
     ///
     /// All endorsements must have been signed with the same server key, and they must be for points
-    /// hidden with the same client key, or the resulting endorsement will not produce a valid token.
+    /// hidden with the same client key, or the resulting endorsement will not produce a valid
+    /// token.
     ///
     /// This is a set-like operation: order does not matter, and the result is equivalent to the
     /// server issuing an endorsement of a sum of hidden attribute points. It is still an
     /// all-or-nothing endorsement; it does not allow one endorsement to be used for *any* point in
     /// the set, nor arbitrary subsets.
+    ///
+    /// This is equivalent to calling [`Self::combine_with`] repeatedly.
     pub fn combine(endorsements: impl IntoIterator<Item = Endorsement>) -> Endorsement {
         Endorsement {
             R: endorsements.into_iter().map(|each| each.R).sum(),
+        }
+    }
+
+    /// Combines this endorsement with another.
+    ///
+    /// Both endorsements must have been signed with the same server key, and they must be for
+    /// points hidden with the same client key, or the resulting endorsement will not produce a
+    /// valid token.
+    ///
+    /// This is a set-like operation: order does not matter, and the result is equivalent to the
+    /// server issuing an endorsement of a sum of hidden attribute points. It is still an
+    /// all-or-nothing endorsement; it does not allow one endorsement to be used for *either* point
+    /// in the set.
+    ///
+    /// This is equivalent to [`Self::combine`].
+    pub fn combine_with(&self, other: &Endorsement) -> Endorsement {
+        Endorsement {
+            R: self.R + other.R,
+        }
+    }
+
+    /// Creates an endorsement with `other` removed from `self`.
+    ///
+    /// This is useful when `self` represents a [combined](Self::combine) endorsement, but you want
+    /// to remove some of the attributes from the original combined set.
+    ///
+    /// ```
+    /// # use zkcredential::endorsements::Endorsement;
+    /// # fn example(a: Endorsement, b: Endorsement, c: Endorsement) {
+    /// let abc = Endorsement::combine([a, b, c]);
+    /// let a_and_c = abc.remove(&b); // Equivalent to a.combine_with(c).
+    /// # }
+    /// ```
+    ///
+    /// Both endorsements must have been signed with the same server key, and they must be for
+    /// points hidden with the same client key, or the resulting endorsement will not produce a
+    /// valid token. Removing endorsements not present in `self` will also result in an endorsement
+    /// that won't produce valid tokens.
+    ///
+    /// This is a set-like operation: order does not matter, and the result is equivalent to the
+    /// server issuing an endorsement of a difference of hidden attribute points. Multiple
+    /// endorsements can be removed by calling this method repeatedly, or by removing a single
+    /// combined endorsement.
+    pub fn remove(&self, other: &Endorsement) -> Endorsement {
+        Endorsement {
+            R: self.R - other.R,
         }
     }
 
@@ -512,7 +677,25 @@ mod tests {
             .clone()
             .receive(encrypted_points, &todays_public_key)
             .unwrap();
-        assert_eq!(client_provided_points.len(), endorsements.len());
+        assert_eq!(
+            client_provided_points.len(),
+            endorsements.decompressed.len()
+        );
+        assert_eq!(
+            endorsements.decompressed.len(),
+            endorsements.compressed.len()
+        );
+
+        for (decompressed, compressed) in endorsements
+            .decompressed
+            .iter()
+            .zip(&endorsements.compressed)
+        {
+            assert_eq!(
+                decompressed.compress().R.as_bytes(),
+                compressed.R.as_bytes(),
+            );
+        }
 
         assert!(
             response
@@ -540,6 +723,7 @@ mod tests {
         );
 
         let tokens = endorsements
+            .decompressed
             .into_iter()
             .map(|endorsement| endorsement.to_token(&decrypt_key));
 
@@ -589,11 +773,11 @@ mod tests {
         let decrypt_key = ClientDecryptionKey::from_blinding_scalar(client_raw_key);
         let todays_public_key = root_key.public.derive_key(info_sho.clone());
 
-        let mut endorsements = issued_endorsements
+        let endorsements = issued_endorsements
             .receive(encrypted_points, &todays_public_key)
-            .unwrap();
-        endorsements.remove(1);
-        let combined = Endorsement::combine(endorsements);
+            .unwrap()
+            .decompressed;
+        let combined = Endorsement::combine(endorsements.iter().copied()).remove(&endorsements[1]);
 
         let token = combined.to_token(&decrypt_key);
         todays_key
@@ -602,6 +786,10 @@ mod tests {
                 &token,
             )
             .unwrap();
+
+        let manually_combined = endorsements[0].combine_with(&endorsements[2]);
+        let manual_token = manually_combined.to_token(&decrypt_key);
+        assert_eq!(&token, &manual_token);
     }
 
     #[test]
@@ -680,7 +868,49 @@ mod tests {
             .clone()
             .receive(encrypted_points, &todays_public_key)
             .unwrap();
-        assert_eq!(client_provided_points.len(), endorsements.len());
-        round_trip(&endorsements[0], POINT_BYTE_COUNT);
+        assert_eq!(client_provided_points.len(), endorsements.compressed.len());
+        round_trip(&endorsements.compressed[0], POINT_BYTE_COUNT);
+        round_trip(&endorsements.decompressed[0], POINT_BYTE_COUNT);
+    }
+
+    #[test]
+    fn default_is_identity() {
+        assert_eq!(Endorsement::combine([]).R, Endorsement::default().R);
+
+        let mut input_sho = poksho::ShoSha256::new(b"test");
+        let root_key = ServerRootKeyPair::generate([42; RANDOMNESS_LEN]);
+
+        // Client
+
+        let client_provided_points = [
+            input_sho.get_point(),
+            input_sho.get_point(),
+            input_sho.get_point(),
+        ];
+
+        let client_raw_key = input_sho.get_scalar();
+        let encrypted_points = client_provided_points.map(|p| client_raw_key * p);
+
+        let mut info_sho = poksho::ShoHmacSha256::new(b"ExamplePass");
+        info_sho.absorb_and_ratchet(b"today's date");
+
+        // Server
+
+        let todays_key = root_key.derive_key(info_sho.clone());
+        let response =
+            EndorsementResponse::issue(encrypted_points, &todays_key, [43; RANDOMNESS_LEN]);
+
+        // Client
+
+        let todays_public_key = root_key.public.derive_key(info_sho.clone());
+        let endorsements = response
+            .clone()
+            .receive(encrypted_points, &todays_public_key)
+            .unwrap()
+            .decompressed;
+        assert_eq!(
+            endorsements[0].remove(&endorsements[0]).R,
+            Endorsement::default().R
+        );
     }
 }

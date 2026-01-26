@@ -42,13 +42,13 @@ class PinTests: TestCaseBase {
         XCTAssertEqual(
             pinHash.accessKey,
             // echo "ab7e8499d21f80a6600b3b9ee349ac6d72c07e3359fe885a934ba7aa844429f8" | xxd -r -p | base64
-            Array(Data(base64Encoded: "q36EmdIfgKZgCzue40msbXLAfjNZ/ohak0unqoREKfg=")!)
+            Data(base64Encoded: "q36EmdIfgKZgCzue40msbXLAfjNZ/ohak0unqoREKfg=")!
         )
 
         XCTAssertEqual(
             pinHash.encryptionKey,
             // echo "44652df80490fc66bb864a9e638b2f7dc9e20649671dd66bbb9c37bee2bfecf1" | xxd -r -p | base64
-            Array(Data(base64Encoded: "RGUt+ASQ/Ga7hkqeY4svfcniBklnHdZru5w3vuK/7PE=")!)
+            Data(base64Encoded: "RGUt+ASQ/Ga7hkqeY4svfcniBklnHdZru5w3vuK/7PE=")!
         )
     }
 
@@ -61,13 +61,13 @@ class PinTests: TestCaseBase {
         XCTAssertEqual(
             pinHash.accessKey,
             // echo "301d9dd1e96f20ce51083f67d3298fd37b97525de8324d5e12ed2d407d3d927b" | xxd -r -p | base64
-            Array(Data(base64Encoded: "MB2d0elvIM5RCD9n0ymP03uXUl3oMk1eEu0tQH09kns=")!)
+            Data(base64Encoded: "MB2d0elvIM5RCD9n0ymP03uXUl3oMk1eEu0tQH09kns=")!
         )
 
         XCTAssertEqual(
             pinHash.encryptionKey,
             // echo "b6f16aa0591732e339b7e99cdd5fd6586a1c285c9d66876947fd82f66ed99757" | xxd -r -p | base64
-            Array(Data(base64Encoded: "tvFqoFkXMuM5t+mc3V/WWGocKFydZodpR/2C9m7Zl1c=")!)
+            Data(base64Encoded: "tvFqoFkXMuM5t+mc3V/WWGocKFydZodpR/2C9m7Zl1c=")!
         )
     }
 
@@ -75,11 +75,9 @@ class PinTests: TestCaseBase {
         let pin = Array("password".utf8)
         let username = "username"
 
-        // echo acb1973aa0bbbd14b3b4e06f145497d948fd4a98efc500fcce363b3b743ec482 | xxd -r -p | base64
-        let mrenclave = Data(base64Encoded: "rLGXOqC7vRSztOBvFFSX2Uj9SpjvxQD8zjY7O3Q+xII=")!
+        let mrenclave = [UInt8](fromHexString: "97f151f6ed078edbbfd72fa9cae694dcc08353f1f5e8d9ccd79a971b10ffc535")!
 
-        // echo "cb44493fd6c83173a5a42e3e7295283771449a054f2dd37e48c87dbc5fdc7a0d" | xxd -r -p | base64
-        let knownSalt = Data(base64Encoded: "y0RJP9bIMXOlpC4+cpUoN3FEmgVPLdN+SMh9vF/ceg0=")!
+        let knownSalt = [UInt8](fromHexString: "70dd66bdcbb23f5173323f054becc5b617ae475ba8de067946f198efff7a5f83")!
 
         let pinHash = try PinHash(normalizedPin: pin, username: username, mrenclave: mrenclave)
 

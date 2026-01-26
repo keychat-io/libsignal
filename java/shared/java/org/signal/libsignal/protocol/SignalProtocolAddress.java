@@ -5,34 +5,41 @@
 
 package org.signal.libsignal.protocol;
 
+import static org.signal.libsignal.internal.FilterExceptions.filterExceptions;
+
+import org.signal.libsignal.internal.CalledFromNative;
 import org.signal.libsignal.internal.Native;
 import org.signal.libsignal.internal.NativeHandleGuard;
 
-public class SignalProtocolAddress implements NativeHandleGuard.Owner {
-  private final long unsafeHandle;
-
+public class SignalProtocolAddress extends NativeHandleGuard.SimpleOwner {
+  /**
+   * @param name the identifier for the recipient, usually a {@link ServiceId}
+   * @param deviceId the identifier for the device; must be in the range 1-127 inclusive
+   */
   public SignalProtocolAddress(String name, int deviceId) {
-    this.unsafeHandle = Native.ProtocolAddress_New(name, deviceId);
+    super(filterExceptions(() -> Native.ProtocolAddress_New(name, deviceId)));
   }
 
+  /**
+   * @param serviceId the identifier for the recipient
+   * @param deviceId the identifier for the device; must be in the range 1-127 inclusive
+   */
   public SignalProtocolAddress(ServiceId serviceId, int deviceId) {
     this(serviceId.toServiceIdString(), deviceId);
   }
 
-  public SignalProtocolAddress(long unsafeHandle) {
-    this.unsafeHandle = unsafeHandle;
+  @CalledFromNative
+  public SignalProtocolAddress(long nativeHandle) {
+    super(nativeHandle);
   }
 
   @Override
-  @SuppressWarnings("deprecation")
-  protected void finalize() {
-    Native.ProtocolAddress_Destroy(this.unsafeHandle);
+  protected void release(long nativeHandle) {
+    Native.ProtocolAddress_Destroy(nativeHandle);
   }
 
   public String getName() {
-    try (NativeHandleGuard guard = new NativeHandleGuard(this)) {
-      return Native.ProtocolAddress_Name(guard.nativeHandle());
-    }
+    return guardedMap(Native::ProtocolAddress_Name);
   }
 
   /**
@@ -71,9 +78,5 @@ public class SignalProtocolAddress implements NativeHandleGuard.Owner {
   @Override
   public int hashCode() {
     return this.getName().hashCode() ^ this.getDeviceId();
-  }
-
-  public long unsafeNativeHandleWithoutGuard() {
-    return this.unsafeHandle;
   }
 }

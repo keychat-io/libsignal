@@ -109,7 +109,7 @@
 //! # Adding new argument and result types
 //!
 //! If your argument or result type is a Rust value being wrapped in an opaque box, declare it
-//! using the `bridge_handle` macro alongside other such types. Otherwise, there are two steps:
+//! using the `bridge_as_handle` macro alongside other such types. Otherwise, there are two steps:
 //!
 //! 1. Argument and result types for FFI and JNI are determined by macros `ffi_arg_type`,
 //!    `ffi_result_type`, `jni_arg_type`, and `jni_result_type`. You may need to add your new type
@@ -155,7 +155,7 @@ fn value_for_meta_key<'a>(
 ) -> Option<&'a Expr> {
     meta_values
         .iter()
-        .find(|meta| meta.path.get_ident().map_or(false, |ident| ident == key))
+        .find(|meta| meta.path.get_ident().is_some_and(|ident| ident == key))
         .map(|meta| &meta.value)
 }
 
@@ -179,9 +179,79 @@ fn name_for_meta_key(
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 enum ResultKind {
     Regular,
     Void,
+}
+
+#[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
+struct ResultInfo {
+    kind: ResultKind,
+    #[allow(dead_code)]
+    failable: bool,
+}
+
+impl From<&syn::ReturnType> for ResultInfo {
+    fn from(value: &syn::ReturnType) -> Self {
+        let type_ = match &value {
+            ReturnType::Default => {
+                return ResultInfo {
+                    kind: ResultKind::Void,
+                    failable: false,
+                };
+            }
+            ReturnType::Type(_, type_) => type_.as_ref(),
+        };
+
+        let output_type = match &type_ {
+            syn::Type::Path(path) if path.qself.is_none() => &path.path,
+            syn::Type::Tuple(t) if t.elems.is_empty() => {
+                return ResultInfo {
+                    kind: ResultKind::Void,
+                    failable: false,
+                };
+            }
+            _ => {
+                return ResultInfo {
+                    kind: ResultKind::Regular,
+                    failable: false,
+                };
+            }
+        };
+
+        let check_for_result = |segment: &syn::PathSegment| {
+            if segment.ident != "Result" {
+                return None;
+            }
+
+            let PathArguments::AngleBracketed(args) = &segment.arguments else {
+                return None;
+            };
+
+            let arg = args.args.first()?;
+            match arg {
+                GenericArgument::Type(syn::Type::Tuple(t)) if t.elems.is_empty() => {
+                    Some(ResultKind::Void)
+                }
+                _ => Some(ResultKind::Regular),
+            }
+        };
+
+        let last_segment = output_type.segments.last();
+        if let Some(result_kind) = last_segment.and_then(check_for_result) {
+            return ResultInfo {
+                kind: result_kind,
+                failable: true,
+            };
+        }
+
+        ResultInfo {
+            kind: ResultKind::Regular,
+            failable: false,
+        }
+    }
 }
 
 enum BridgingKind<T = Type> {
@@ -225,7 +295,6 @@ impl Parse for BridgeIoParams {
 fn bridge_fn_impl(
     attr: TokenStream,
     item: TokenStream,
-    result_kind: ResultKind,
     bridging_kind: BridgingKind<()>,
 ) -> TokenStream {
     let function = parse_macro_input!(item as ItemFn);
@@ -245,6 +314,7 @@ fn bridge_fn_impl(
             )
         }
     };
+    let result_info = ResultInfo::from(&function.sig.output);
 
     let ffi_name = match name_for_meta_key(&item_names, "ffi", || {
         ffi::name_from_ident(&function.sig.ident)
@@ -274,7 +344,7 @@ fn bridge_fn_impl(
     // We could early-exit on the Errors returned from generating each wrapper,
     // but since they could be for unrelated issues, it's better to show all of them to the user.
     let ffi_fn = ffi_name.map(|name| {
-        ffi::bridge_fn(&name, &function.sig, result_kind, &bridging_kind)
+        ffi::bridge_fn(&name, &function.sig, result_info, &bridging_kind)
             .unwrap_or_else(Error::into_compile_error)
     });
     let jni_fn = jni_name.map(|name| {
@@ -319,41 +389,67 @@ fn bridge_fn_impl(
 /// ```
 #[proc_macro_attribute]
 pub fn bridge_fn(attr: TokenStream, item: TokenStream) -> TokenStream {
-    bridge_fn_impl(attr, item, ResultKind::Regular, BridgingKind::Regular)
-}
-
-/// Generates C, Java, and Node entry points for a Rust function that returns `Result<(), _>`.
-///
-/// Because the C bindings conventions use out-parameters for successful return values,
-/// a case of "no result on success" must be annotated specially.
-///
-/// See the [crate-level documentation](crate) for more information.
-///
-/// # Example
-///
-/// ```ignore
-/// // Produces a C function manually named "signal_process_postkey"
-/// // and a JNI function named "PostKey_1Process" (with JNI "_1" mangling for an underscore),
-/// // with the Node entry point disabled.
-/// # #[cfg(ignore_even_when_running_all_tests)]
-/// #[bridge_fn_void(ffi = "process_postkey", node = false)]
-/// fn PostKey_Process(post_key: &PostKey) -> Result<()> {
-///   // ...
-/// }
-/// ```
-#[proc_macro_attribute]
-pub fn bridge_fn_void(attr: TokenStream, item: TokenStream) -> TokenStream {
-    bridge_fn_impl(attr, item, ResultKind::Void, BridgingKind::Regular)
+    bridge_fn_impl(attr, item, BridgingKind::Regular)
 }
 
 #[proc_macro_attribute]
 pub fn bridge_io(attr: TokenStream, item: TokenStream) -> TokenStream {
-    bridge_fn_impl(
-        attr,
-        item,
-        ResultKind::Regular,
-        BridgingKind::Io { runtime: () },
-    )
+    bridge_fn_impl(attr, item, BridgingKind::Io { runtime: () })
+}
+
+/// Generates C, Java, and Node bridging for the callbacks in a Rust trait.
+///
+/// Arguments to callbacks use the same handling as result types as described in the [crate-level
+/// documentation](crate). Argument conversion is assumed to be generally infallible under normal
+/// circumstances and will only produce logs on failure.
+///
+/// TODO: more docs
+#[proc_macro_attribute]
+pub fn bridge_callbacks(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let trait_item = parse_macro_input!(item as ItemTrait);
+    let item_names =
+        parse_macro_input!(attr with Punctuated<MetaNameValue, Token![,]>::parse_terminated);
+
+    let ffi_name = match name_for_meta_key(&item_names, "ffi", || trait_item.ident.to_string()) {
+        Ok(name) => name,
+        Err(error) => return error.to_compile_error().into(),
+    };
+    let jni_name = match name_for_meta_key(&item_names, "jni", || trait_item.ident.to_string()) {
+        Ok(name) => name,
+        Err(error) => return error.to_compile_error().into(),
+    };
+    let node_name = match name_for_meta_key(&item_names, "node", || trait_item.ident.to_string()) {
+        Ok(name) => name,
+        Err(error) => return error.to_compile_error().into(),
+    };
+
+    let ffi_feature = ffi_name.as_ref().map(|_| quote!(feature = "ffi"));
+    let jni_feature = jni_name.as_ref().map(|_| quote!(feature = "jni"));
+    let node_feature = node_name.as_ref().map(|_| quote!(feature = "node"));
+    let maybe_features = [ffi_feature, jni_feature, node_feature];
+    let feature_list = maybe_features.iter().flatten();
+
+    // We could early-exit on the Errors returned from generating each wrapper,
+    // but since they could be for unrelated issues, it's better to show all of them to the user.
+    let ffi_items = ffi_name
+        .map(|_name| ffi::bridge_trait(&trait_item).unwrap_or_else(Error::into_compile_error));
+    let jni_items = jni_name.map(|name| {
+        jni::bridge_trait(&trait_item, &name).unwrap_or_else(Error::into_compile_error)
+    });
+    let node_items = node_name
+        .map(|_name| node::bridge_trait(&trait_item).unwrap_or_else(Error::into_compile_error));
+
+    quote! {
+        #[cfg(any(#(#feature_list,)*))]
+        #trait_item
+
+        #ffi_items
+
+        #jni_items
+
+        #node_items
+    }
+    .into()
 }
 
 #[cfg(test)]
@@ -400,5 +496,103 @@ mod bridge_io_params_tests {
                 .into_iter()
                 .collect::<Vec<_>>(),
         );
+    }
+}
+
+#[cfg(test)]
+mod return_type_test {
+    use super::*;
+
+    #[test]
+    fn implicit() {
+        let parsed: ItemFn = parse_quote! {
+            fn no_return() {}
+        };
+        assert_eq!(
+            ResultInfo::from(&parsed.sig.output),
+            ResultInfo {
+                kind: ResultKind::Void,
+                failable: false,
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_empty_tuple() {
+        let parsed: ItemFn = parse_quote! {
+            fn returns_empty_tuple() -> () {}
+        };
+        assert_eq!(
+            ResultInfo::from(&parsed.sig.output),
+            ResultInfo {
+                kind: ResultKind::Void,
+                failable: false,
+            }
+        );
+    }
+
+    #[test]
+    fn result_returns() {
+        let parsed: &[ItemFn] = &[
+            parse_quote! { fn result_empty_tuple() -> Result<(), Err> { unimplemented!() } },
+            parse_quote! { fn result_empty_tuple_alias() -> Result<()> { unimplemented!() } },
+            parse_quote! { fn result_fq_empty_tuple() -> std::result::Result<(), Err> { unimplemented!() } },
+            parse_quote! { fn result_fq_empty_tuple_alias() -> my::package::custom::Result<()> { unimplemented!() } },
+        ];
+
+        for item in parsed {
+            assert_eq!(
+                ResultInfo::from(&item.sig.output),
+                ResultInfo {
+                    kind: ResultKind::Void,
+                    failable: true,
+                },
+                "{}",
+                item.to_token_stream()
+            );
+        }
+    }
+
+    #[test]
+    fn regular_types() {
+        let parsed: &[ItemFn] = &[
+            parse_quote! { fn returns_bool() -> bool { unimplemented!() } },
+            parse_quote! { fn returns_u32() -> u32 { unimplemented!() } },
+            parse_quote! { fn returns_bool_and_u32() -> (bool, u32) { unimplemented!() } },
+        ];
+
+        for item in parsed {
+            assert_eq!(
+                ResultInfo::from(&item.sig.output),
+                ResultInfo {
+                    kind: ResultKind::Regular,
+                    failable: false,
+                },
+                "{}",
+                item.to_token_stream()
+            );
+        }
+    }
+
+    #[test]
+    fn regular_result_types() {
+        let parsed: &[ItemFn] = &[
+            parse_quote! { fn returns_result_u32_alias() -> Result<u32> { unimplemented!() } },
+            parse_quote! { fn returns_result_u32() -> Result<u32, Err> { unimplemented!() } },
+            parse_quote! { fn returns_result_two_u32() -> Result<(u32, u32), Err> { unimplemented!() } },
+            parse_quote! { fn returns_fq_result_u32() -> std::result::Result<u32, Err> { unimplemented!() } },
+        ];
+
+        for item in parsed {
+            assert_eq!(
+                ResultInfo::from(&item.sig.output),
+                ResultInfo {
+                    kind: ResultKind::Regular,
+                    failable: true,
+                },
+                "{}",
+                item.to_token_stream()
+            );
+        }
     }
 }

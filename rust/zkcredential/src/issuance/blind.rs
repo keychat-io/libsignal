@@ -55,17 +55,17 @@ use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 use curve25519_dalek::ristretto::RistrettoPoint;
 use curve25519_dalek::scalar::Scalar;
 use partial_default::PartialDefault;
+use poksho::shoapi::ShoApiExt as _;
 use poksho::{ShoApi, ShoHmacSha256};
 use serde::{Deserialize, Serialize};
 
 use crate::attributes::{Attribute, RevealedAttribute};
 use crate::credentials::{Credential, CredentialKeyPair, CredentialPublicKey, NUM_SUPPORTED_ATTRS};
-use crate::issuance::IssuanceProofBuilder;
-use crate::sho::ShoExt;
-use crate::{VerificationFailure, RANDOMNESS_LEN};
-
 #[cfg(doc)]
 use crate::issuance::IssuanceProof;
+use crate::issuance::IssuanceProofBuilder;
+use crate::sho::ShoExt;
+use crate::{RANDOMNESS_LEN, VerificationFailure};
 
 /// Marker trait used by [`BlindedPoint`] and [`BlindedAttribute`].
 ///
@@ -243,7 +243,7 @@ impl Serialize for BlindingKeyPair {
     }
 }
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 struct BlindedCredential {
     t: Scalar,
     U: RistrettoPoint,
@@ -256,7 +256,7 @@ struct BlindedCredential {
 /// Slightly larger than a typical [`IssuanceProof`] (which is why it's a separate type at all).
 ///
 /// Use [`IssuanceProofBuilder`] to validate and extract the credential.
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct BlindedIssuanceProof {
     credential: BlindedCredential,
     poksho_proof: Vec<u8>,
@@ -489,9 +489,9 @@ impl BlindedIssuanceProofBuilder<'_> {
                 &scalar_args,
                 &point_args,
                 self.inner.authenticated_message,
-                &sho.squeeze_and_ratchet(RANDOMNESS_LEN)[..],
+                &sho.squeeze_and_ratchet_as_array::<RANDOMNESS_LEN>(),
             )
-            .unwrap();
+            .expect("valid proof");
         BlindedIssuanceProof {
             poksho_proof,
             credential,

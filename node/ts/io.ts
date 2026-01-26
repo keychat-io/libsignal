@@ -3,20 +3,28 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import * as Native from '../Native';
-import type { Buffer } from 'node:buffer';
-import type { IoError } from './Errors';
+import * as Native from './Native.js';
+import type { IoError } from './Errors.js';
 
 /**
  * An abstract class representing an input stream of bytes.
  */
 export abstract class InputStream implements Native.InputStream {
-  _read(amount: number): Promise<Buffer> {
+  _read(amount: number): Promise<Uint8Array> {
     return this.read(amount);
   }
 
   _skip(amount: number): Promise<void> {
     return this.skip(amount);
+  }
+
+  /**
+   * Called to indicate the stream's resources should be released.
+   *
+   * The default implementation does nothing and completes immediately. Subclasses should not expect
+   */
+  close(): Promise<void> {
+    return Promise.resolve();
   }
 
   /**
@@ -26,10 +34,10 @@ export abstract class InputStream implements Native.InputStream {
    * however, returning zero bytes always indicates that the end of the stream has been reached.
    *
    * @param amount The amount of bytes to read.
-   * @returns A promise yielding a {@link Buffer} containing the read bytes.
+   * @returns A promise yielding a {@link Uint8Array} containing the read bytes.
    * @throws {IoError} If an I/O error occurred while reading from the input.
    */
-  abstract read(amount: number): Promise<Buffer>;
+  abstract read(amount: number): Promise<Uint8Array>;
 
   /**
    * Skip an amount of bytes in the input stream.

@@ -8,13 +8,22 @@ For the most part, libsignal is tested using each language's usual testing infra
 % ./gradlew client:test server:test android:connectedAndroidTest
 
 # Node
-% yarn build && yarn tsc && yarn test
+% npm run build && npm run tsc && npm run test
 
 # Swift
 % ./build_ffi.sh --generate-ffi && swift test
 ```
 
 However, sometimes there are some more interesting test configurations; those are documented here.
+
+
+# Rust Benchmarks
+
+- If you are testing on an ARM64 device (including Desktop), you should compile with `RUSTFLAGS="--cfg aes_armv8"` to enable hardware support in the `aes` crate.
+
+- Similarly, although most tests are not very sensitive to the speed of SHA-2, you should also compile with `--features sha2/asm`. (`libsignal-message-backup` turns this on by default as a dev-dependency.) This will go away when we get to update to sha2 0.11.
+
+All of these configuration options are normally set either at the bridge crate level or in the build scripts for each bridged platform, but they may not be set when running with plain `cargo bench`.
 
 
 # Running cross-compiling Rust tests with custom runners
@@ -33,7 +42,7 @@ Rust allows running tests with cross-compiled targets, but normally that only wo
     ANDROID_NDK_HOME=path/to/ndk
     CARGO_PROFILE_TEST_STRIP=debuginfo   # make the "push" step take less time
     CARGO_PROFILE_BENCH_STRIP=debuginfo  # same for benchmarks
-    CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=path/to/ndk/toolchains/llvm/prebuilt/YOUR_HOST_HERE/bin/    aarch64-linux-android21-clang
+    CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=path/to/ndk/toolchains/llvm/prebuilt/YOUR_HOST_HERE/bin/aarch64-linux-android23-clang
     CARGO_TARGET_AARCH64_LINUX_ANDROID_RUNNER=bin/adb-run-test # in the repo root
     ```
 

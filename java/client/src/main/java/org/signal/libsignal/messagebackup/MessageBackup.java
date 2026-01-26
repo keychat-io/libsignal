@@ -10,9 +10,9 @@ import static org.signal.libsignal.internal.FilterExceptions.filterExceptions;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.function.Supplier;
+import kotlin.Pair;
 import org.signal.libsignal.internal.Native;
 import org.signal.libsignal.internal.NativeHandleGuard;
-import org.signal.libsignal.protocol.util.Pair;
 
 /** Message-backup-related functionality. */
 public class MessageBackup {
@@ -33,14 +33,8 @@ public class MessageBackup {
 
   public static enum Purpose {
     // This needs to be kept in sync with the corresponding Rust enum.
-    DEVICE_TRANSFER(0),
-    REMOTE_BACKUP(1);
-
-    private final int value;
-
-    private Purpose(int value) {
-      this.value = value;
-    }
+    DEVICE_TRANSFER,
+    REMOTE_BACKUP,
   }
 
   /**
@@ -55,15 +49,15 @@ public class MessageBackup {
    * @return informational result about the successful validation
    * @throws ValidationError with an error message if the input is invalid
    * @throws IOException if the input could not be read
+   * @see OnlineBackupValidator
    */
   public static ValidationResult validate(
       MessageBackupKey key, Purpose purpose, Supplier<InputStream> streamFactory, long streamLength)
       throws ValidationError, IOException {
-    InputStream first = streamFactory.get();
-    InputStream second = streamFactory.get();
-
     Pair<String, String[]> result;
-    try (NativeHandleGuard keyGuard = new NativeHandleGuard(key)) {
+    try (InputStream first = streamFactory.get();
+        InputStream second = streamFactory.get();
+        NativeHandleGuard keyGuard = new NativeHandleGuard(key)) {
 
       Object output =
           filterExceptions(
@@ -71,7 +65,7 @@ public class MessageBackup {
               ValidationError.class,
               () ->
                   Native.MessageBackupValidator_Validate(
-                      keyGuard.nativeHandle(), first, second, streamLength, purpose.value));
+                      keyGuard.nativeHandle(), first, second, streamLength, purpose.ordinal()));
 
       // Rust conversion code is generating an instance of this class.
       @SuppressWarnings("unchecked")
@@ -79,11 +73,11 @@ public class MessageBackup {
       result = outputPair;
     }
 
-    String errorMessage = result.first();
+    String errorMessage = result.getFirst();
     if (errorMessage != null) {
-      throw new ValidationError(errorMessage, result.second());
+      throw new ValidationError(errorMessage, result.getSecond());
     }
 
-    return new ValidationResult(result.second());
+    return new ValidationResult(result.getSecond());
   }
 }

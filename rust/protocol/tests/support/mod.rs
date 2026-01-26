@@ -7,24 +7,24 @@
 // APIs will always be considered dead code.
 #![allow(dead_code)]
 
-use futures_util::FutureExt;
-use libsignal_protocol::*;
-use rand::rngs::OsRng;
-use rand::{CryptoRng, Rng};
-
 use std::ops::RangeFrom;
 use std::result;
 use std::time::SystemTime;
+
+use futures_util::FutureExt;
+use libsignal_protocol::*;
+use rand::rngs::OsRng;
+use rand::{CryptoRng, Rng, TryRngCore as _};
 
 // Deliberately not reusing the constants from `protocol`.
 pub const PRE_KYBER_MESSAGE_VERSION: u32 = 3;
 pub const KYBER_AWARE_MESSAGE_VERSION: u32 = 4;
 
 pub fn test_in_memory_protocol_store() -> Result<InMemSignalProtocolStore, SignalProtocolError> {
-    let mut csprng = OsRng;
+    let mut csprng = OsRng.unwrap_err();
     let identity_key = IdentityKeyPair::generate(&mut csprng);
     // Valid registration IDs fit in 14 bits.
-    let registration_id: u8 = csprng.gen();
+    let registration_id: u8 = csprng.random();
 
     InMemSignalProtocolStore::new(identity_key, registration_id as u32)
 }
@@ -34,12 +34,14 @@ pub async fn encrypt(
     remote_address: &ProtocolAddress,
     msg: &str,
 ) -> Result<CiphertextMessage, SignalProtocolError> {
+    let mut csprng = OsRng.unwrap_err();
     let result = message_encrypt(
         msg.as_bytes(),
         remote_address,
         &mut store.session_store,
         &mut store.identity_store,
         SystemTime::now(),
+        &mut csprng,
     )
     .await;
     Ok(result.unwrap().0)
@@ -50,8 +52,8 @@ pub async fn decrypt(
     remote_address: &ProtocolAddress,
     msg: &CiphertextMessage,
 ) -> Result<Vec<u8>, SignalProtocolError> {
-    let mut csprng = OsRng;
-    let result = message_decrypt(
+    let mut csprng = OsRng.unwrap_err();
+    message_decrypt(
         msg,
         remote_address,
         &mut store.session_store,
@@ -73,7 +75,7 @@ pub async fn create_pre_key_bundle<R: Rng + CryptoRng>(
 ) -> Result<PreKeyBundle, SignalProtocolError> {
     let pre_key_pair = KeyPair::generate(&mut csprng);
     let signed_pre_key_pair = KeyPair::generate(&mut csprng);
-    let kyber_pre_key_pair = kem::KeyPair::generate(kem::KeyType::Kyber1024);
+    let kyber_pre_key_pair = kem::KeyPair::generate(kem::KeyType::Kyber1024, &mut csprng);
 
     let signed_pre_key_public = signed_pre_key_pair.public_key.serialize();
     let signed_pre_key_signature = store
@@ -89,25 +91,23 @@ pub async fn create_pre_key_bundle<R: Rng + CryptoRng>(
         .private_key()
         .calculate_signature(&kyber_pre_key_public, &mut csprng)?;
 
-    let device_id: u32 = csprng.gen();
-    let pre_key_id: u32 = csprng.gen();
-    let signed_pre_key_id: u32 = csprng.gen();
-    let kyber_pre_key_id: u32 = csprng.gen();
+    let device_id: DeviceId = csprng.random();
+    let pre_key_id: u32 = csprng.random();
+    let signed_pre_key_id: u32 = csprng.random();
+    let kyber_pre_key_id: u32 = csprng.random();
 
     let pre_key_bundle = PreKeyBundle::new(
         store.get_local_registration_id().await?,
-        device_id.into(),
+        device_id,
         Some((pre_key_id.into(), pre_key_pair.public_key)),
         signed_pre_key_id.into(),
         signed_pre_key_pair.public_key,
         signed_pre_key_signature.to_vec(),
-        *store.get_identity_key_pair().await?.identity_key(),
-    )?;
-    let pre_key_bundle = pre_key_bundle.with_kyber_pre_key(
         kyber_pre_key_id.into(),
         kyber_pre_key_pair.public_key.clone(),
         kyber_pre_key_signature.to_vec(),
-    );
+        *store.get_identity_key_pair().await?.identity_key(),
+    )?;
 
     store
         .save_pre_key(
@@ -116,7 +116,7 @@ pub async fn create_pre_key_bundle<R: Rng + CryptoRng>(
         )
         .await?;
 
-    let timestamp = csprng.gen();
+    let timestamp = Timestamp::from_epoch_millis(csprng.random());
 
     store
         .save_signed_pre_key(
@@ -135,7 +135,7 @@ pub async fn create_pre_key_bundle<R: Rng + CryptoRng>(
             kyber_pre_key_id.into(),
             &KyberPreKeyRecord::new(
                 kyber_pre_key_id.into(),
-                43,
+                Timestamp::from_epoch_millis(43),
                 &kyber_pre_key_pair,
                 &kyber_pre_key_signature,
             ),
@@ -144,44 +144,8 @@ pub async fn create_pre_key_bundle<R: Rng + CryptoRng>(
     Ok(pre_key_bundle)
 }
 
-pub fn initialize_sessions_v3() -> Result<(SessionRecord, SessionRecord), SignalProtocolError> {
-    let mut csprng = OsRng;
-    let alice_identity = IdentityKeyPair::generate(&mut csprng);
-    let bob_identity = IdentityKeyPair::generate(&mut csprng);
-
-    let alice_base_key = KeyPair::generate(&mut csprng);
-
-    let bob_base_key = KeyPair::generate(&mut csprng);
-    let bob_ephemeral_key = bob_base_key;
-
-    let alice_params = AliceSignalProtocolParameters::new(
-        alice_identity,
-        alice_base_key,
-        *bob_identity.identity_key(),
-        bob_base_key.public_key,
-        bob_ephemeral_key.public_key,
-    );
-
-    let alice_session = initialize_alice_session_record(&alice_params, &mut csprng)?;
-
-    let bob_params = BobSignalProtocolParameters::new(
-        bob_identity,
-        bob_base_key,
-        None,
-        bob_ephemeral_key,
-        None,
-        *alice_identity.identity_key(),
-        alice_base_key.public_key,
-        None,
-    );
-
-    let bob_session = initialize_bob_session_record(&bob_params)?;
-
-    Ok((alice_session, bob_session))
-}
-
 pub fn initialize_sessions_v4() -> Result<(SessionRecord, SessionRecord), SignalProtocolError> {
-    let mut csprng = OsRng;
+    let mut csprng = OsRng.unwrap_err();
     let alice_identity = IdentityKeyPair::generate(&mut csprng);
     let bob_identity = IdentityKeyPair::generate(&mut csprng);
 
@@ -190,7 +154,7 @@ pub fn initialize_sessions_v4() -> Result<(SessionRecord, SessionRecord), Signal
     let bob_base_key = KeyPair::generate(&mut csprng);
     let bob_ephemeral_key = bob_base_key;
 
-    let bob_kyber_key = kem::KeyPair::generate(kem::KeyType::Kyber1024);
+    let bob_kyber_key = kem::KeyPair::generate(kem::KeyType::Kyber1024, &mut csprng);
 
     let alice_params = AliceSignalProtocolParameters::new(
         alice_identity,
@@ -198,8 +162,8 @@ pub fn initialize_sessions_v4() -> Result<(SessionRecord, SessionRecord), Signal
         *bob_identity.identity_key(),
         bob_base_key.public_key,
         bob_ephemeral_key.public_key,
-    )
-    .with_their_kyber_pre_key(&bob_kyber_key.public_key);
+        bob_kyber_key.public_key.clone(),
+    );
 
     let alice_session = initialize_alice_session_record(&alice_params, &mut csprng)?;
     let kyber_ciphertext = {
@@ -215,10 +179,10 @@ pub fn initialize_sessions_v4() -> Result<(SessionRecord, SessionRecord), Signal
         bob_base_key,
         None,
         bob_ephemeral_key,
-        Some(bob_kyber_key),
+        bob_kyber_key,
         *alice_identity.identity_key(),
         alice_base_key.public_key,
-        Some(&kyber_ciphertext),
+        &kyber_ciphertext,
     );
 
     let bob_session = initialize_bob_session_record(&bob_params)?;
@@ -250,17 +214,17 @@ impl From<u32> for IdChoice {
 }
 
 pub struct TestStoreBuilder {
-    rng: OsRng,
+    rng: rand_core::UnwrapErr<OsRng>,
     pub(crate) store: InMemSignalProtocolStore,
     id_range: RangeFrom<u32>,
 }
 
 impl TestStoreBuilder {
     pub fn new() -> Self {
-        let mut rng = OsRng;
+        let mut rng = OsRng.unwrap_err();
         let identity_key = IdentityKeyPair::generate(&mut rng);
         // Valid registration IDs fit in 14 bits.
-        let registration_id: u8 = rng.gen();
+        let registration_id: u8 = rng.random();
 
         let store = InMemSignalProtocolStore::new(identity_key, registration_id as u32)
             .expect("can create store");
@@ -273,7 +237,7 @@ impl TestStoreBuilder {
 
     pub fn from_store(store: &InMemSignalProtocolStore) -> Self {
         Self {
-            rng: OsRng,
+            rng: OsRng.unwrap_err(),
             store: store.clone(),
             id_range: 0..,
         }
@@ -314,7 +278,12 @@ impl TestStoreBuilder {
         let pair = KeyPair::generate(&mut self.rng);
         let public = pair.public_key.serialize();
         let signature = self.sign(&public);
-        let record = SignedPreKeyRecord::new(id.into(), 42, &pair, &signature);
+        let record = SignedPreKeyRecord::new(
+            id.into(),
+            Timestamp::from_epoch_millis(42),
+            &pair,
+            &signature,
+        );
         self.store
             .save_signed_pre_key(id.into(), &record)
             .now_or_never()
@@ -335,10 +304,15 @@ impl TestStoreBuilder {
                 "Signed pre key ids should be increasing"
             );
         }
-        let pair = kem::KeyPair::generate(kem::KeyType::Kyber1024);
+        let pair = kem::KeyPair::generate(kem::KeyType::Kyber1024, &mut self.rng);
         let public = pair.public_key.serialize();
         let signature = self.sign(&public);
-        let record = KyberPreKeyRecord::new(id.into(), 43, &pair, &signature);
+        let record = KyberPreKeyRecord::new(
+            id.into(),
+            Timestamp::from_epoch_millis(43),
+            &pair,
+            &signature,
+        );
         self.store
             .save_kyber_pre_key(id.into(), &record)
             .now_or_never()
@@ -380,14 +354,19 @@ impl TestStoreBuilder {
                     .expect("has signed pre key")
             })
             .expect("contains at least one signed pre key");
-        let maybe_kyber_pre_key_record = self.store.all_kyber_pre_key_ids().max().map(|id| {
-            self.store
-                .get_kyber_pre_key(*id)
-                .now_or_never()
-                .expect("sync")
-                .expect("has kyber pre key")
-        });
-        let mut bundle = PreKeyBundle::new(
+        let kyber_pre_key_record = self
+            .store
+            .all_kyber_pre_key_ids()
+            .max()
+            .map(|id| {
+                self.store
+                    .get_kyber_pre_key(*id)
+                    .now_or_never()
+                    .expect("sync")
+                    .expect("has kyber pre key")
+            })
+            .expect("contains at least one kyber key");
+        PreKeyBundle::new(
             registration_id,
             device_id,
             maybe_pre_key_record.map(|rec| {
@@ -399,17 +378,12 @@ impl TestStoreBuilder {
             signed_pre_key_record.id().expect("has id"),
             signed_pre_key_record.public_key().expect("has public key"),
             signed_pre_key_record.signature().expect("has signature"),
+            kyber_pre_key_record.id().expect("has id"),
+            kyber_pre_key_record.public_key().expect("has public key"),
+            kyber_pre_key_record.signature().expect("has signature"),
             *identity_key,
         )
-        .expect("can make pre key bundle from store");
-        if let Some(rec) = maybe_kyber_pre_key_record {
-            bundle = bundle.with_kyber_pre_key(
-                rec.id().expect("has id"),
-                rec.public_key().expect("has public key"),
-                rec.signature().expect("has signature"),
-            );
-        }
-        bundle
+        .expect("can make pre key bundle from store")
     }
 
     fn sign(&mut self, message: &[u8]) -> Box<[u8]> {
@@ -434,7 +408,7 @@ impl TestStoreBuilder {
             IdChoice::Exactly(id) => id,
             // TODO: check the maximal existing id and continue from it
             IdChoice::Next => self.next_id(),
-            IdChoice::Random => self.rng.gen(),
+            IdChoice::Random => self.rng.random(),
         }
     }
 }

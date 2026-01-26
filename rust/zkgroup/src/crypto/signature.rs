@@ -3,15 +3,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+use curve25519_dalek_signal::constants::RISTRETTO_BASEPOINT_POINT;
+use curve25519_dalek_signal::ristretto::RistrettoPoint;
+use curve25519_dalek_signal::scalar::Scalar;
+use partial_default::PartialDefault;
+use serde::{Deserialize, Serialize};
+
 use crate::common::constants::*;
 use crate::common::errors::*;
 use crate::common::sho::*;
 use crate::common::simple_types::*;
-use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
-use curve25519_dalek::ristretto::RistrettoPoint;
-use curve25519_dalek::scalar::Scalar;
-use partial_default::PartialDefault;
-use serde::{Deserialize, Serialize};
 
 #[derive(Copy, Clone, PartialEq, Eq, Serialize, Deserialize, PartialDefault)]
 pub struct KeyPair {
@@ -39,7 +40,7 @@ impl KeyPair {
             self.signing_key,
             self.public_key,
             message,
-            &sho.squeeze(RANDOMNESS_LEN)[..],
+            &sho.squeeze_as_array::<RANDOMNESS_LEN>(),
         )
         .expect("signature failed to self-verify; bad public key?");
         let mut s: SignatureBytes = [0u8; SIGNATURE_LEN];

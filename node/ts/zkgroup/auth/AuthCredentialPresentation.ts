@@ -3,14 +3,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import ByteArray from '../internal/ByteArray';
-import * as Native from '../../../Native';
-import UuidCiphertext from '../groups/UuidCiphertext';
+import ByteArray from '../internal/ByteArray.js';
+import * as Native from '../../Native.js';
+import UuidCiphertext from '../groups/UuidCiphertext.js';
 
 export default class AuthCredentialPresentation extends ByteArray {
   private readonly __type?: never;
 
-  constructor(contents: Buffer) {
+  constructor(contents: Uint8Array) {
     super(contents, Native.AuthCredentialPresentation_CheckValidContents);
   }
 
@@ -20,14 +20,10 @@ export default class AuthCredentialPresentation extends ByteArray {
     );
   }
 
-  getPniCiphertext(): UuidCiphertext | null {
-    const ciphertextBytes = Native.AuthCredentialPresentation_GetPniCiphertext(
-      this.contents
+  getPniCiphertext(): UuidCiphertext {
+    return new UuidCiphertext(
+      Native.AuthCredentialPresentation_GetPniCiphertext(this.contents)
     );
-    if (ciphertextBytes === null) {
-      return null;
-    }
-    return new UuidCiphertext(ciphertextBytes);
   }
 
   getRedemptionTime(): Date {

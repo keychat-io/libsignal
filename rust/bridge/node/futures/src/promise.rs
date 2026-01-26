@@ -3,11 +3,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+use std::future::Future;
+use std::panic::{AssertUnwindSafe, UnwindSafe, catch_unwind};
+
 use futures_util::FutureExt;
 use neon::prelude::*;
 use neon::types::JsPromise;
-use std::future::Future;
-use std::panic::{catch_unwind, AssertUnwindSafe, UnwindSafe};
 
 use crate::executor::{AssertSendSafe, ChannelEx};
 use crate::util::describe_panic;
@@ -68,8 +69,6 @@ where
                     // If we get a panic downstream, it is entirely possible the JavaScript context won't be usable anymore.
                     // However, the only thing we're going to do with the context after a panic is throw an error.
                     let mut cx = AssertUnwindSafe(&mut cx);
-                    // Auto-deref does not actually kick in here.
-                    #[allow(clippy::explicit_auto_deref)]
                     catch_unwind(move || settle(*cx))
                 }
                 Ok(Err(exception)) => {

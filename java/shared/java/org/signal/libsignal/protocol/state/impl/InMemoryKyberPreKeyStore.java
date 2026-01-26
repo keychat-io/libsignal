@@ -5,14 +5,18 @@
 
 package org.signal.libsignal.protocol.state.impl;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import kotlin.Pair;
 import org.signal.libsignal.protocol.InvalidKeyIdException;
 import org.signal.libsignal.protocol.InvalidMessageException;
+import org.signal.libsignal.protocol.ReusedBaseKeyException;
+import org.signal.libsignal.protocol.ecc.ECPublicKey;
 import org.signal.libsignal.protocol.state.KyberPreKeyRecord;
 import org.signal.libsignal.protocol.state.KyberPreKeyStore;
 
@@ -20,6 +24,7 @@ public class InMemoryKyberPreKeyStore implements KyberPreKeyStore {
 
   private final Map<Integer, byte[]> store = new HashMap<>();
   private final Set<Integer> used = new HashSet<>();
+  private final Map<Pair<Integer, Integer>, Set<ECPublicKey>> baseKeysSeen = new HashMap<>();
 
   @Override
   public KyberPreKeyRecord loadKyberPreKey(int kyberPreKeyId) throws InvalidKeyIdException {
@@ -60,9 +65,17 @@ public class InMemoryKyberPreKeyStore implements KyberPreKeyStore {
   }
 
   @Override
-  public void markKyberPreKeyUsed(int kyberPreKeyId) {
+  public void markKyberPreKeyUsed(int kyberPreKeyId, int signedPreKeyId, ECPublicKey baseKey)
+      throws ReusedBaseKeyException {
     // store.remove(kyberPreKeyId);
     used.add(kyberPreKeyId);
+    final var bothKeyIds = new Pair<>(kyberPreKeyId, signedPreKeyId);
+    final var baseKeysSeen = this.baseKeysSeen.get(bothKeyIds);
+    if (baseKeysSeen == null) {
+      this.baseKeysSeen.put(bothKeyIds, new HashSet<>(Arrays.asList(baseKey)));
+    } else if (!baseKeysSeen.add(baseKey)) {
+      throw new ReusedBaseKeyException();
+    }
   }
 
   public boolean hasKyberPreKeyBeenUsed(int kyberPreKeyId) {

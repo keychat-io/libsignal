@@ -3,18 +3,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import { assert, use } from 'chai';
-import * as chaiAsPromised from 'chai-as-promised';
+import { assert, expect, use } from 'chai';
+import chaiAsPromised from 'chai-as-promised';
+import { Buffer } from 'node:buffer';
+import { randomBytes } from 'node:crypto';
+import * as stream from 'node:stream';
+
 import {
-  DigestingWritable,
-  ValidatingWritable,
+  chunkSizeInBytes,
+  DigestingPassThrough,
   everyNthByte,
   inferChunkSize,
-  chunkSizeInBytes,
-} from '../incremental_mac';
-import { LibSignalErrorBase } from '../Errors';
+  ValidatingPassThrough,
+} from '../incremental_mac.js';
+import { ErrorCode, LibSignalErrorBase } from '../Errors.js';
 
-import * as stream from 'stream';
+import { assertArrayEquals } from './util.js';
 
 use(chaiAsPromised);
 
@@ -32,34 +36,38 @@ const TEST_DIGEST = Buffer.from(
   'hex'
 );
 
-const CHUNK_SIZE = everyNthByte(32);
-
 describe('Incremental MAC', () => {
-  it('calculates the chunk size', () => {
-    assert.equal(64 * 1024, chunkSizeInBytes(inferChunkSize(0)));
-    assert.equal(64 * 1024, chunkSizeInBytes(inferChunkSize(42)));
-    assert.equal(64 * 1024, chunkSizeInBytes(inferChunkSize(1024)));
-    assert.equal(64 * 1024, chunkSizeInBytes(inferChunkSize(10 * 1024)));
-    assert.equal(
-      400 * 1024,
-      chunkSizeInBytes(inferChunkSize(100 * 1024 * 1024))
-    );
-  });
-
-  describe('DigestingWritable', () => {
-    it('produces the digest', async () => {
-      const digesting = new DigestingWritable(TEST_KEY, CHUNK_SIZE);
-      await stream.promises.pipeline(testInputStream(), digesting);
+  describe('chunkSizeInBytes', () => {
+    it('calculates the chunk size', () => {
+      assert.equal(64 * 1024, chunkSizeInBytes(inferChunkSize(0)));
+      assert.equal(64 * 1024, chunkSizeInBytes(inferChunkSize(42)));
+      assert.equal(64 * 1024, chunkSizeInBytes(inferChunkSize(1024)));
+      assert.equal(64 * 1024, chunkSizeInBytes(inferChunkSize(10 * 1024)));
       assert.equal(
-        TEST_DIGEST.toString('hex'),
-        digesting.getFinalDigest().toString('hex')
+        400 * 1024,
+        chunkSizeInBytes(inferChunkSize(100 * 1024 * 1024))
       );
     });
   });
 
-  describe('ValidatingWritable', () => {
+  describe('DigestingPassThrough', () => {
+    const CHUNK_SIZE = everyNthByte(32);
+
+    it('produces the digest', async () => {
+      const digestingPassThrough = new DigestingPassThrough(
+        TEST_KEY,
+        CHUNK_SIZE
+      );
+      await stream.promises.pipeline(testInputStream(), digestingPassThrough);
+      assertArrayEquals(TEST_DIGEST, digestingPassThrough.getFinalDigest());
+    });
+  });
+
+  describe('ValidatingPassThrough', () => {
+    const CHUNK_SIZE = everyNthByte(32);
+
     it('successful validation', async () => {
-      const validating = new ValidatingWritable(
+      const validating = new ValidatingPassThrough(
         TEST_KEY,
         CHUNK_SIZE,
         TEST_DIGEST
@@ -69,7 +77,7 @@ describe('Incremental MAC', () => {
     });
 
     it('corrupted input', async () => {
-      const validating = new ValidatingWritable(
+      const validating = new ValidatingPassThrough(
         TEST_KEY,
         CHUNK_SIZE,
         TEST_DIGEST
@@ -79,11 +87,14 @@ describe('Incremental MAC', () => {
         stream.Readable.from(badInput),
         validating
       );
-      await assert.isRejected(promise, LibSignalErrorBase);
+      const error = (await expect(promise).to.be.rejectedWith(
+        LibSignalErrorBase
+      )) as LibSignalErrorBase;
+      assert.equal(error.code, ErrorCode.IncrementalMacVerificationFailed);
     });
 
     it('corrupted input in finalize', async () => {
-      const validating = new ValidatingWritable(
+      const validating = new ValidatingPassThrough(
         TEST_KEY,
         CHUNK_SIZE,
         TEST_DIGEST
@@ -93,13 +104,16 @@ describe('Incremental MAC', () => {
         stream.Readable.from(badInput),
         validating
       );
-      await assert.isRejected(promise, LibSignalErrorBase);
+      const error = (await expect(promise).to.be.rejectedWith(
+        LibSignalErrorBase
+      )) as LibSignalErrorBase;
+      assert.equal(error.code, ErrorCode.IncrementalMacVerificationFailed);
     });
 
     it('corrupted digest', async () => {
       const badDigest = Buffer.from(TEST_DIGEST);
       badDigest[42] ^= 0xff;
-      const validating = new ValidatingWritable(
+      const validating = new ValidatingPassThrough(
         TEST_KEY,
         CHUNK_SIZE,
         badDigest
@@ -108,23 +122,84 @@ describe('Incremental MAC', () => {
         stream.Readable.from(TEST_INPUT),
         validating
       );
-      await assert.isRejected(promise, LibSignalErrorBase);
+      const error = (await expect(promise).to.be.rejectedWith(
+        LibSignalErrorBase
+      )) as LibSignalErrorBase;
+      assert.equal(error.code, ErrorCode.IncrementalMacVerificationFailed);
+    });
+  });
+  describe('ValidatingPassThrough', () => {
+    // Use uneven chunk size to trigger buffering
+    const CHUNK_SIZE = 13579;
+
+    function toChunkedReadable(buffer: Uint8Array): stream.Readable {
+      const chunked = new Array<Uint8Array>();
+      for (let i = 0; i < buffer.byteLength; i += CHUNK_SIZE) {
+        chunked.push(buffer.subarray(i, i + CHUNK_SIZE));
+      }
+
+      return stream.Readable.from(chunked);
+    }
+
+    it('should emit whole source stream', async () => {
+      const source = randomBytes(10 * 1024 * 1024);
+      const key = randomBytes(32);
+
+      const chunkSize = inferChunkSize(source.byteLength);
+      const writable = new DigestingPassThrough(key, chunkSize);
+      await stream.promises.pipeline(stream.Readable.from(source), writable);
+
+      const digest = writable.getFinalDigest();
+      const validator = new ValidatingPassThrough(key, chunkSize, digest);
+
+      const received = new Array<Buffer>();
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+      validator.on('data', (chunk) => received.push(chunk));
+
+      await Promise.all([
+        stream.promises.pipeline(toChunkedReadable(source), validator),
+        stream.promises.finished(validator),
+      ]);
+
+      const actual = Buffer.concat(received);
+      assert.isTrue(actual.equals(source));
     });
 
-    it('keeps track of validated size', () => {
-      const validating = new ValidatingWritable(
-        TEST_KEY,
-        CHUNK_SIZE,
-        TEST_DIGEST
+    it('should emit error on digest mismatch', async () => {
+      const source = randomBytes(10 * 1024 * 1024);
+      const key = randomBytes(32);
+
+      const chunkSize = inferChunkSize(source.byteLength);
+      const writable = new DigestingPassThrough(key, chunkSize);
+      await stream.promises.pipeline(stream.Readable.from(source), writable);
+
+      const digest = writable.getFinalDigest();
+      const wrongKey = randomBytes(32);
+      const validator = new ValidatingPassThrough(wrongKey, chunkSize, digest);
+
+      validator.on('data', () => {
+        throw new Error('Should not be called');
+      });
+
+      const promise = stream.promises.pipeline(
+        toChunkedReadable(source),
+        validator
       );
-      validating.write(Buffer.from(TEST_INPUT[0]));
-      assert.equal(0, validating.validatedSize());
-      validating.write(Buffer.from(TEST_INPUT[1]));
-      assert.equal(32, validating.validatedSize());
-      validating.write(Buffer.from(TEST_INPUT[2]));
-      assert.equal(32, validating.validatedSize());
-      validating.end();
-      assert.equal(50, validating.validatedSize());
+      const error = (await expect(promise).to.be.rejectedWith(
+        LibSignalErrorBase
+      )) as LibSignalErrorBase;
+      assert.equal(error.code, ErrorCode.IncrementalMacVerificationFailed);
+      assert.equal(error.message, 'Corrupted input data');
+    });
+
+    it('handles an invalid digest', () => {
+      const badDigest = Buffer.of(1);
+      expect(
+        () =>
+          new ValidatingPassThrough(TEST_KEY, inferChunkSize(1000), badDigest)
+      )
+        .to.throw(LibSignalErrorBase)
+        .with.property('code', ErrorCode.IncrementalMacVerificationFailed);
     });
   });
 });

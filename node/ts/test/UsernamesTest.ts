@@ -4,10 +4,10 @@
 //
 
 import { assert, expect } from 'chai';
-import { ErrorCode, LibSignalError, LibSignalErrorBase } from '../Errors';
-import * as usernames from '../usernames';
-import * as util from './util';
-import { decryptUsernameLink } from '../usernames';
+import { ErrorCode, LibSignalError, LibSignalErrorBase } from '../Errors.js';
+import * as usernames from '../usernames.js';
+import * as util from './util.js';
+import { decryptUsernameLink } from '../usernames.js';
 
 util.initLogger();
 
@@ -64,7 +64,7 @@ describe('usernames', () => {
     it('throws for an invalid hash', () => {
       const nickname = 'He110.101';
       const hash = usernames.hash(nickname);
-      const badHash = hash.slice(1);
+      const badHash = hash.subarray(1);
       const proof = usernames.generateProof(nickname);
       assert.throws(() => usernames.verifyProof(proof, badHash));
     });
@@ -206,15 +206,15 @@ describe('usernames', () => {
         .with.property('code', ErrorCode.InputDataTooLong);
     });
     it('will error on invalid entropy data size', () => {
-      const entropy = Buffer.alloc(16);
-      const encryptedUsername = Buffer.alloc(32);
+      const entropy = new Uint8Array(16);
+      const encryptedUsername = new Uint8Array(32);
       expect(() => decryptUsernameLink({ entropy, encryptedUsername }))
         .throws(LibSignalErrorBase)
         .with.property('code', ErrorCode.InvalidEntropyDataLength);
     });
     it('will error on invalid encrypted username data', () => {
-      const entropy = Buffer.alloc(32);
-      const encryptedUsername = Buffer.alloc(32);
+      const entropy = new Uint8Array(32);
+      const encryptedUsername = new Uint8Array(32);
       expect(() => decryptUsernameLink({ entropy, encryptedUsername }))
         .throws(LibSignalErrorBase)
         .with.property('code', ErrorCode.InvalidUsernameLinkEncryptedData);

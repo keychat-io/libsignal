@@ -1,18 +1,34 @@
-name: Build and Test
+name: "[CI] Build and Test"
 
 on:
   push:
     branches: [ main ]
   pull_request: # all target branches
+  workflow_dispatch:
+    inputs:
+      skip_cargo_cache:
+        description: Skip cargo cache restore/save steps
+        default: false
+        type: boolean
+
+# On PRs, "head_ref" is defined and is consistent across updates. On
+# pushes, it's not defined, so we use "run_id", which is unique across
+# every run; as a result, all actions on pushes will run to completion.
+#
+# Reference: https://docs.github.com/en/actions/using-jobs/using-concurrency
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  NDK_VERSION: 25.2.9519653
+  NDK_VERSION: 28.0.13004108
   RUST_BACKTRACE: 1
-  LIBSIGNAL_MINIMUM_SUPPORTED_RUST_VERSION: 1.72
   # For dev builds, include limited debug info in the output. See
   # https://doc.rust-lang.org/cargo/reference/profiles.html#debug
   CARGO_PROFILE_DEV_DEBUG: limited
+  DO_CLEAN_BUILD_AND_POPULATE_CACHE: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
+  SHOULD_USE_CARGO_CACHE: ${{ secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' && secrets.R2_ENDPOINT != '' && inputs.skip_cargo_cache != true }}
 
 jobs:
   changes:
@@ -33,7 +49,9 @@ jobs:
       rust_ios: ${{ steps.filter.outputs.rust_ios }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
 
     - uses: dorny/paths-filter@0bc4621a3135347011ad047f9ecf449bf72ce2bd # v3.0
       id: filter
@@ -41,6 +59,7 @@ jobs:
         filters: |
           all: &all
           - '.github/workflows/build_and_test.yml'
+          - '.github/actions/**'
           - 'bin/**'
           - 'rust/*'
           - 'rust/!(bridge|protocol)/**'
@@ -50,6 +69,7 @@ jobs:
           - 'rust-toolchain'
           - 'Cargo.toml'
           - 'Cargo.lock'
+          - '.cargo/**' # overly conservative, but it's fine
           rust:
           - *all
           - '.clippy.toml'
@@ -84,15 +104,20 @@ jobs:
           - '.gitignore'
           - '.gitattributes'
           - '.editorconfig'
+          - '.tool-versions'
+          - 'justfile'
+          - 'doc/**'
 
     - name: Check pattern completeness
       run: echo "::error file=.github/workflows/build_and_test.yml::File not included in any filter" && false
-      if: ${{ !contains(steps.filter.outputs.*, 'true') }}
+      # `actionlint` does not like it when you write this like: `!contains(steps.filter.outputs.*, 'true')`
+      # It also does not include a way to inline ignore a single instance of a warning. C'est la vie.
+      if: ${{ !contains(toJSON(steps.filter.outputs), '"true"') }}
 
   rust:
     name: Rust
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-4-cores
 
     needs: changes
 
@@ -106,134 +131,267 @@ jobs:
         - version: nightly
           toolchain: "$(cat rust-toolchain)"
         - version: stable
-          toolchain: "${LIBSIGNAL_MINIMUM_SUPPORTED_RUST_VERSION}"
+          # Extract 'rust-version' value from Cargo.toml.
+          toolchain: "$(yq '.workspace.package.rust-version' $(git rev-parse --show-toplevel)/Cargo.toml)"
+
+    timeout-minutes: 45
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
 
-    - run: sudo apt-get update && sudo apt-get install protobuf-compiler
+    - name: Install protoc
+      run: ./bin/install_protoc_linux
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component rustfmt,clippy
+    - run: rustup toolchain install "${{ matrix.toolchain }}" --profile minimal --component rustfmt,clippy
+
+    - name: Restore cargo cache
+      id: rust-cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      uses: ./.github/actions/restore-cargo-cache
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        job-name: rust-${{ matrix.version }}
+        toolchain: ${{ matrix.toolchain }}
+
+    - name: Build
+      run: cargo +${{ matrix.toolchain }} build --workspace --features libsignal-ffi/signal-media --verbose --keep-going
+
+    - name: Run tests
+      run: cargo +${{ matrix.toolchain }} test --workspace --all-features --verbose --no-fail-fast -- --include-ignored
+
+    - name: Test run benches
+      # Run with a match-all regex to select all the benchmarks, which (confusingly) causes other tests to be skipped.
+      run: cargo +${{ matrix.toolchain }} test --workspace --benches --all-features --verbose --no-fail-fast '.*'
+
+    - name: Build bins and examples
+      run: cargo +${{ matrix.toolchain }} build --workspace  --bins --examples --all-features --verbose --keep-going
+
+    - name: Clippy
+      run: cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings
+      if: matrix.version == 'nightly'
+
+    - name: Rust docs
+      run: cargo +${{ matrix.toolchain }} doc --workspace --all-features --keep-going
+      if: matrix.version == 'stable'
+      env:
+        RUSTDOCFLAGS: -D warnings
+
+    - name: Save cargo cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      uses: ./.github/actions/save-cargo-cache
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        key: ${{ steps['rust-cache'].outputs['cache-key'] }}
+
+  rust32:
+    name: Rust (32-bit testing)
+
+    runs-on: ubuntu-latest-4-cores
+
+    needs: changes
+
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [nightly, stable]
+        include:
+        - version: nightly
+          toolchain: "$(cat rust-toolchain)"
+        - version: stable
+          # Extract 'rust-version' value from Cargo.toml.
+          toolchain: "$(yq '.workspace.package.rust-version' $(git rev-parse --show-toplevel)/Cargo.toml)"
+
+    timeout-minutes: 45
+
+    steps:
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
+
+    - run: sudo apt-get update && sudo apt-get install gcc-multilib g++-multilib
+
+    - name: Install protoc
+      run: ./bin/install_protoc_linux
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - run: rustup toolchain install "${{ matrix.toolchain }}" --profile minimal --target i686-unknown-linux-gnu
+
+    - name: Restore cargo cache
+      id: rust-cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      uses: ./.github/actions/restore-cargo-cache
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        job-name: rust32-${{ matrix.version }}
+        toolchain: ${{ matrix.toolchain }}
+
+    - name: Run tests (32-bit)
+      # Exclude signal-neon-futures because those tests run Node
+      run: cargo +${{ matrix.toolchain }} test --workspace --all-features --verbose --target i686-unknown-linux-gnu --exclude signal-neon-futures --no-fail-fast -- --include-ignored
+
+    - name: Save cargo cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      uses: ./.github/actions/save-cargo-cache
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        key: ${{ steps['rust-cache'].outputs['cache-key'] }}
+
+  rust-fuzz-build:
+    name: Rust (Fuzz Targets)
+
+    runs-on: ubuntu-latest
+
+    needs: changes
+
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+
+    steps:
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
+
+    - name: Install protoc
+      run: ./bin/install_protoc_linux
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Resolve latest stable MSRV toolchain
+      id: rust-fuzz-build-toolchain
+      run: echo "latest-stable-msrv-toolchain=$(yq '.workspace.package.rust-version' Cargo.toml)" >> "$GITHUB_OUTPUT"
+
+    - name: Install Rust stable toolchain
+      run: rustup toolchain install "${{ steps.rust-fuzz-build-toolchain.outputs.latest-stable-msrv-toolchain }}" --profile minimal
+
+    - name: Restore cargo cache
+      id: rust-cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      uses: ./.github/actions/restore-cargo-cache
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        job-name: rust-fuzz-build
+        toolchain: ${{ steps.rust-fuzz-build-toolchain.outputs.latest-stable-msrv-toolchain }}
+
+    # We check the fuzz targets on stable because they don't have lockfiles,
+    # and crates don't generally support arbitrary nightly versions.
+    # See https://github.com/dtolnay/proc-macro2/issues/307 for an example.
+    - name: Check that the protocol fuzz target still builds
+      run: cargo +${{ steps.rust-fuzz-build-toolchain.outputs.latest-stable-msrv-toolchain }} check --all-targets --keep-going
+      working-directory: rust/protocol/fuzz
+      env:
+        RUSTFLAGS: --cfg fuzzing
+
+    - name: Check that the attest fuzz target still builds
+      run: cargo +${{ steps.rust-fuzz-build-toolchain.outputs.latest-stable-msrv-toolchain }} check --all-targets --keep-going
+      working-directory: rust/attest/fuzz
+      env:
+        RUSTFLAGS: --cfg fuzzing
+
+    - name: Save cargo cache
+      uses: ./.github/actions/save-cargo-cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        key: ${{ steps['rust-cache'].outputs['cache-key'] }}
+
+  rust-fmt:
+    name: Rust (Formatting and Acknowledgments)
+
+    runs-on: ubuntu-latest
+
+    needs: changes
+
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+
+    timeout-minutes: 45
+
+    steps:
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
+
+    - name: Install protoc
+      run: ./bin/install_protoc_linux
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Resolve pinned nightly toolchain
+      id: rust-fmt-toolchain
+      run: echo "pinned-nightly-toolchain=$(cat rust-toolchain)" >> "$GITHUB_OUTPUT"
+
+    - name: Install pinned nightly toolchain
+      run: rustup toolchain install "${{ steps.rust-fmt-toolchain.outputs.pinned-nightly-toolchain }}" --profile minimal --component rustfmt
 
     - name: Cache locally-built tools
-      uses: actions/cache@v4
+      uses: runs-on/cache@3a15256b3556fbc5ae15f7f04598e4c7680e9c25 # v4
       with:
         path: local-tools
-        key: ${{ runner.os }}-local-tools-${{ matrix.version }}-${{ hashFiles('acknowledgments/cargo-about-version') }}
+        key: local-tools-${{ runner.os }}-infra-${{ hashFiles('acknowledgments/cargo-about-version', '.taplo-cli-version') }}
 
     - name: Build cargo-about if needed
-      run: cargo +stable install --version $(cat acknowledgments/cargo-about-version) --locked cargo-about --root local-tools
-      if: matrix.version == 'nightly'
+      run: cargo +stable install --version "$(cat acknowledgments/cargo-about-version)" --locked cargo-about --root local-tools
+
+    - name: Build taplo-cli if needed
+      run: cargo +stable install --version "$(cat .taplo-cli-version)" --locked taplo-cli --root local-tools
 
     # This should be done before anything else
     # because it also checks that the lockfile is up to date.
     - name: Check for duplicate dependencies
       run: ./bin/verify_duplicate_crates
-      if: matrix.version == 'nightly'
+
+    - name: Cargo.toml formatting check
+      run: PATH="$PATH:$PWD/local-tools/bin" taplo format -c .taplo.toml --check
 
     - name: Rustfmt check
-      run: cargo fmt --all -- --check
-      if: matrix.version == 'nightly'
+      run: cargo +${{ steps.rust-fmt-toolchain.outputs.pinned-nightly-toolchain }} fmt --all -- --check
 
     - name: Rustfmt check for cross-version-testing
-      run: cargo fmt --all -- --check
+      run: cargo +${{ steps.rust-fmt-toolchain.outputs.pinned-nightly-toolchain }} fmt --all -- --check
       working-directory: rust/protocol/cross-version-testing
-      if: matrix.version == 'nightly'
-
-    - name: Check bridge versioning
-      run: ./bin/update_versions.py
-      if: matrix.version == 'nightly'
 
     - name: Check acknowledgments
-      run: PATH="$PATH:$PWD/local-tools/bin" ./bin/regenerate_acknowledgments.sh && git diff --name-status --exit-code acknowledgments
-      if: matrix.version == 'nightly'
+      run: PATH="$PATH:$PWD/local-tools/bin" ./bin/regenerate_acknowledgments.sh && git diff --exit-code acknowledgments
 
-    - name: Build
-      run: cargo +${{ matrix.toolchain }} build --workspace --features libsignal-ffi/signal-media --verbose
+  java_android:
+    name: Java Android
 
-    - name: Run tests
-      run: cargo +${{ matrix.toolchain }} test --workspace --all-features --verbose -- --include-ignored
-
-    - name: Test run benches
-      run: cargo +${{ matrix.toolchain }} test --workspace --benches --all-features --verbose
-
-    - name: Build bins and examples
-      run: cargo +${{ matrix.toolchain }} build --workspace  --bins --examples --all-features --verbose
-
-    - name: Clippy
-      run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      if: matrix.version == 'nightly'
-
-    - name: cargo clean (reclaim disk space)
-      # Clean the contents of the target directory to avoid running out of disk space during the
-      # doc build.
-      run: cargo clean
-      if: matrix.version == 'stable'
-
-    - name: Rust docs
-      run: cargo +${{ matrix.toolchain }} doc --workspace --all-features
-      if: matrix.version == 'stable'
-      env:
-        RUSTFLAGS: -D warnings
-
-    # We check the fuzz targets on stable because they don't have lockfiles,
-    # and crates don't generally support arbitrary nightly versions.
-    # See https://github.com/dtolnay/proc-macro2/issues/307 for an example.
-
-    - name: cargo clean (reclaim disk space)
-      # Clean the contents of the target directory to avoid running out of disk space during the
-      # following steps.
-      run: cargo clean
-      if: matrix.version == 'stable'
-
-    - name: Check that the protocol fuzz target still builds
-      run: cargo +${{ matrix.toolchain }} check --all-targets
-      working-directory: rust/protocol/fuzz
-      env:
-        RUSTFLAGS: --cfg fuzzing
-      if: matrix.version == 'stable'
-
-    - name: Check that the attest fuzz target still builds
-      run: cargo +${{ matrix.toolchain }} check --all-targets
-      working-directory: rust/attest/fuzz
-      env:
-        RUSTFLAGS: --cfg fuzzing
-      if: matrix.version == 'stable'
-
-  rust32:
-    name: Rust (32-bit testing)
-
-    runs-on: ubuntu-latest
-
-    needs: changes
-
-    if: ${{ needs.changes.outputs.rust == 'true' }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        version: [nightly, stable]
-        include:
-        - version: nightly
-          toolchain: "$(cat rust-toolchain)"
-        - version: stable
-          toolchain: "${LIBSIGNAL_MINIMUM_SUPPORTED_RUST_VERSION}"
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - run: sudo apt-get update && sudo apt-get install gcc-multilib g++-multilib protobuf-compiler
-
-    - run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal --target i686-unknown-linux-gnu
-
-    - name: Run tests (32-bit)
-      # Exclude signal-neon-futures because those tests run Node
-      run: cargo +${{ matrix.toolchain }} test --workspace --all-features --verbose --target i686-unknown-linux-gnu --exclude signal-neon-futures -- --include-ignored
-
-  java:
-    name: Java
-
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-4-cores
 
     needs: changes
 
@@ -244,23 +402,44 @@ jobs:
 
     if: ${{ needs.changes.outputs.java == 'true' }}
 
+    timeout-minutes: 45
+
     steps:
-    - uses: actions/checkout@v4
+    - run: echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       with:
+        submodules: recursive
         # Download all commits so we can search for the merge base with origin/main.
         fetch-depth: 0
 
     - name: Install NDK
-      run: sudo ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager --install "ndk;${NDK_VERSION}"
+      run: |
+        "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${NDK_VERSION}"
 
-    - run: sudo apt-get update && sudo apt-get install protobuf-compiler
+    - name: Install protoc
+      run: ./bin/install_protoc_linux
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --target aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+    - run: cargo +stable install --version "$(cat .cbindgen-version)" --locked cbindgen
 
-    - name: Verify that the JNI bindings are up to date
-      run: rust/bridge/jni/bin/gen_java_decl.py --verify
+    - run: rustup toolchain install "$(cat rust-toolchain)" --profile minimal --target aarch64-linux-android,armv7-linux-androideabi
 
-    - run: ./gradlew build assembleDebugAndroidTest android:lintDebug | tee ./gradle-output.txt
+    - name: Restore cargo cache
+      id: rust-cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      uses: ./.github/actions/restore-cargo-cache
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        job-name: java-android
+
+    - run: ./gradlew --dependency-verification strict :android:build :android:assembleAndroidTest :android:lintDebug :android:packaging-test:assembleDebugAndroidTest :android:benchmarks:assembleReleaseAndroidTest -PandroidArchs=arm,arm64 -x :makeJniLibrariesDesktop | tee ./gradle-output.txt
       working-directory: java
       shell: bash # Explicitly setting the shell turns on pipefail in GitHub Actions
 
@@ -268,9 +447,85 @@ jobs:
     - run: "! grep WARNING ./gradle-output.txt"
       working-directory: java
 
-    - run: java/check_code_size.py
+    - run: java/check_code_size.py | tee ./check_code_size-output.txt
       env:
         GH_TOKEN: ${{ github.token }}
+
+    - run: grep -v -F '***' ./check_code_size-output.txt >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Save cargo cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      uses: ./.github/actions/save-cargo-cache
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        key: ${{ steps['rust-cache'].outputs['cache-key'] }}
+
+  java_jvm:
+    name: Java JVM
+
+    runs-on: ubuntu-latest-4-cores
+
+    needs: changes
+
+    permissions:
+      contents: read
+
+    if: ${{ needs.changes.outputs.java == 'true' }}
+
+    timeout-minutes: 45
+
+    steps:
+    - run: echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"
+
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
+        fetch-depth: 0
+
+    - name: Install protoc
+      run: ./bin/install_protoc_linux
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - run: cargo +stable install cbindgen
+
+    - run: rustup toolchain install "$(cat rust-toolchain)" --profile minimal
+
+    - name: Restore cargo cache
+      id: rust-cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      uses: ./.github/actions/restore-cargo-cache
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        job-name: java-jvm
+
+    - name: Verify that the JNI bindings are up to date
+      run: rust/bridge/jni/bin/gen_java_decl.py --verify
+
+    - run: ./gradlew --dependency-verification strict build -PskipAndroid
+      working-directory: java
+
+    - name: Save cargo cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      uses: ./.github/actions/save-cargo-cache
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        key: ${{ steps['rust-cache'].outputs['cache-key'] }}
 
   node:
     name: Node
@@ -279,16 +534,33 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest-4-cores, windows-latest-4-cores, macos-15-xlarge]
 
     needs: changes
 
     if: ${{ needs.changes.outputs.node == 'true' }}
 
-    steps:
-    - uses: actions/checkout@v4
+    timeout-minutes: 45
 
-    - run: rustup toolchain install $(cat rust-toolchain) --profile minimal
+    steps:
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
+
+    - run: rustup toolchain install "$(cat rust-toolchain)" --profile minimal
+
+    - name: Restore cargo cache
+      id: rust-cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      uses: ./.github/actions/restore-cargo-cache
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        job-name: node
 
     # install nasm compiler for boring
     - name: Install nasm
@@ -296,39 +568,57 @@ jobs:
       run: choco install nasm
       shell: cmd
 
-    - run: sudo apt-get update && sudo apt-get install protobuf-compiler
-      if: matrix.os == 'ubuntu-latest'
+    - name: Install protoc
+      run: ./bin/install_protoc_linux
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      if: startsWith(matrix.os, 'ubuntu-')
 
     - run: choco install protoc
-      if: matrix.os == 'windows-latest'
+      if: startsWith(matrix.os, 'windows-')
 
     - run: brew install protobuf
-      if: matrix.os == 'macos-latest'
+      if: startsWith(matrix.os, 'macos-')
 
-    - uses: actions/setup-node@v4
+    - uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4.0.2
       with:
         node-version-file: '.nvmrc'
 
     - name: Verify that the Node bindings are up to date
       run: rust/bridge/node/bin/gen_ts_decl.py --verify
-      if: matrix.os == 'ubuntu-latest'
+      if: startsWith(matrix.os, 'ubuntu-')
 
-    - run: yarn install --frozen-lockfile
+    - run: npm ci
       working-directory: node
 
-    - run: yarn tsc
+    - run: npm run build
       working-directory: node
 
-    - run: yarn lint
-      if: matrix.os == 'ubuntu-latest'
+    - run: npm run tsc
       working-directory: node
 
-    - run: yarn format -c
-      if: matrix.os == 'ubuntu-latest'
+    - run: npm run lint
+      if: startsWith(matrix.os, 'ubuntu-')
       working-directory: node
 
-    - run: yarn test
+    - run: npm run format-check
+      if: startsWith(matrix.os, 'ubuntu-')
       working-directory: node
+
+    - run: npm run test
+      working-directory: node
+
+    - name: Save cargo cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      uses: ./.github/actions/save-cargo-cache
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        key: ${{ steps['rust-cache'].outputs['cache-key'] }}
 
   swift_package:
     name: Swift Package
@@ -339,12 +629,36 @@ jobs:
 
     if: ${{ needs.changes.outputs.swift == 'true' }}
 
+    timeout-minutes: 45
+
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      with:
+        submodules: recursive
 
-    - run: rustup toolchain install $(cat rust-toolchain) --profile minimal
+    - run: rustup toolchain install "$(cat rust-toolchain)" --profile minimal
 
-    - run: sudo apt-get update && sudo apt-get install protobuf-compiler
+    - name: Restore cargo cache
+      id: rust-cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      uses: ./.github/actions/restore-cargo-cache
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        job-name: swift-package
+
+    - name: Install protoc
+      run: ./bin/install_protoc_linux
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - run: cargo +stable install --version "$(cat .cbindgen-version)" --locked cbindgen
+
+    - run: swift/verify_error_codes.sh
 
     - name: Build libsignal-ffi
       run: swift/build_ffi.sh -d -v --verify-ffi
@@ -353,45 +667,71 @@ jobs:
       run: swift test -v
       working-directory: swift
 
-    - name: Build Swift package documentation
-      run: swift package plugin generate-documentation --analyze --warnings-as-errors
-      working-directory: swift
+    - name: Build and run Swift benchmarks (in debug mode)
+      run: swift run -v Benchmarks --allow-debug-build
+      working-directory: swift/Benchmarks
+
+    - name: Save cargo cache
+      if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+      uses: ./.github/actions/save-cargo-cache
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        AWS_REGION: us-east-1
+        RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+        RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      with:
+        key: ${{ steps['rust-cache'].outputs['cache-key'] }}
+
+# Disabled for now, broken on Linux in the Swift 6.0 release.
+# See https://forums.swift.org/t/generate-documentation-failing-for-swift-6-pre-release/74534
+#    - name: Build Swift package documentation
+#      run: swift package plugin generate-documentation --analyze --warnings-as-errors
+#      working-directory: swift
 
   swift_cocoapod:
     name: Swift CocoaPod
 
-    runs-on: macOS-latest
+    runs-on: macos-15-xlarge
 
     needs: changes
 
     if: ${{ needs.changes.outputs.swift == 'true' }}
 
+    timeout-minutes: 45
+
+    env:
+      LIBSIGNAL_TESTING_ONLY_ACTIVE_ARCH: 1
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          submodules: recursive
+
+      - run: brew install protobuf swiftlint
 
       - name: Check formatting
-        run: swiftformat --swiftversion 5 --reporter github-actions-log --lint .
+        run: swift format --in-place --parallel --recursive . && git diff --exit-code .
         working-directory: swift
 
       - name: Run lint
         run: swiftlint lint --strict --reporter github-actions-logging
         working-directory: swift
 
-      - name: Check out SignalCoreKit
-        uses: actions/checkout@v4
-        with:
-          repository: signalapp/SignalCoreKit
-          path: SignalCoreKit
+      - run: rustup toolchain install "$(cat rust-toolchain)" --profile minimal --target aarch64-apple-ios-sim
 
-      - run: rustup toolchain install $(cat rust-toolchain) --profile minimal --target x86_64-apple-ios,aarch64-apple-ios-sim
-
-      - run: brew install protobuf
-
-      # Build only the targets that `pod lib lint` will test building.
-      - name: Build for x86_64-apple-ios
-        run: swift/build_ffi.sh --release
+      - name: Restore cargo cache
+        id: rust-cache
+        if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+        uses: ./.github/actions/restore-cargo-cache
         env:
-          CARGO_BUILD_TARGET: x86_64-apple-ios
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+          RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+          RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        with:
+          job-name: swift-cocoapod
 
       - name: Build for aarch64-apple-ios-sim
         run: swift/build_ffi.sh --release
@@ -399,5 +739,16 @@ jobs:
           CARGO_BUILD_TARGET: aarch64-apple-ios-sim
 
       - name: Run pod lint
-        # No import validation because it tries to build unsupported platforms (like 32-bit iOS).
-        run: pod lib lint --verbose --platforms=ios --include-podspecs=SignalCoreKit/SignalCoreKit.podspec --skip-import-validation
+        run: pod lib lint --verbose --platforms=ios --skip-tests
+
+      - name: Save cargo cache
+        if: ${{ env.SHOULD_USE_CARGO_CACHE == 'true' }}
+        uses: ./.github/actions/save-cargo-cache
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+          RUNS_ON_S3_BUCKET_CACHE: libsignal-ci-cache
+          RUNS_ON_S3_BUCKET_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        with:
+          key: ${{ steps['rust-cache'].outputs['cache-key'] }}

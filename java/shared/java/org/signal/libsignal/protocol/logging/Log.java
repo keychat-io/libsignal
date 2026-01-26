@@ -8,6 +8,7 @@ package org.signal.libsignal.protocol.logging;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.net.UnknownHostException;
+import org.signal.libsignal.internal.CalledFromNative;
 
 public class Log {
 
@@ -85,5 +86,10 @@ public class Log {
     if (logger != null) {
       logger.log(priority, tag, msg);
     }
+  }
+
+  @CalledFromNative
+  private static void logFromRust(int priority, String msg) {
+    log(priority, "libsignal", msg);
   }
 }

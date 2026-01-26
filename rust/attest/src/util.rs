@@ -5,8 +5,10 @@
 
 use std::time::SystemTime;
 
-use boring::asn1::Asn1Time;
+use boring_signal::asn1::Asn1Time;
 use libc::time_t;
+
+use crate::constants::{ACCEPTABLE_SW_ADVISORIES, DEFAULT_SW_ADVISORIES};
 
 /// A replacement for [`std::collections::HashMap`] that performs linear lookups.
 ///
@@ -28,10 +30,6 @@ impl<K, V, const N: usize> SmallMap<K, V, N> {
     pub(crate) const fn new(items: [(K, V); N]) -> Self {
         // Evaluate CHECK_MAX_SIZE; this will fail compilation if `N` is too
         // large.
-        //
-        // TODO(https://github.com/rust-lang/rust-clippy/issues/9048): Remove
-        // the unnecessary #[allow].
-        #[allow(clippy::let_unit_value)]
         let _: () = Self::CHECK_MAX_SIZE;
         Self(items)
     }
@@ -47,36 +45,6 @@ pub(crate) fn strip_trailing_null_byte(bytes: &mut &[u8]) {
     *bytes = bytes.strip_suffix(&[0]).unwrap_or(bytes);
 }
 
-/// Reads a little-endian u16 from the slice and advances it by 2 bytes.
-///
-/// Note: Caller must ensure the slice is large enough
-pub(crate) fn read_u16_le(bytes: &mut &[u8]) -> u16 {
-    let (u16_bytes, remainder) = bytes.split_at(2);
-    *bytes = remainder;
-
-    u16::from_le_bytes(u16_bytes.try_into().expect("correct size"))
-}
-
-/// Reads a little-endian u32 from the slice and advances it by 4 bytes.
-///
-/// Note: Caller must ensure the slice is large enough
-pub(crate) fn read_u32_le(bytes: &mut &[u8]) -> u32 {
-    let (u32_bytes, remainder) = bytes.split_at(4);
-    *bytes = remainder;
-
-    u32::from_le_bytes(u32_bytes.try_into().expect("correct size"))
-}
-
-/// Reads a little-endian u64 from the slice and advances it by 8 bytes.
-///
-/// Note: Caller must ensure the slice is large enough
-pub(crate) fn read_u64_le(bytes: &mut &[u8]) -> u64 {
-    let (u64_bytes, remainder) = bytes.split_at(8);
-    *bytes = remainder;
-
-    u64::from_le_bytes(u64_bytes.try_into().expect("correct size"))
-}
-
 /// Removes a slice of `size` from the front of `bytes` and returns it
 ///
 /// Note: Caller must ensure that the slice is large enough
@@ -84,6 +52,15 @@ pub(crate) fn read_bytes<'a>(bytes: &mut &'a [u8], size: usize) -> &'a [u8] {
     let (front, rest) = bytes.split_at(size);
     *bytes = rest;
     front
+}
+
+/// Removes `std::mem::size_of<T>()` bytes from the front of `bytes` and returns it as a `T`.
+///
+/// Returns `None` and leaves `bytes` unchanged if it isn't long enough.
+pub(crate) fn read_from_bytes<T: zerocopy::FromBytes>(bytes: &mut &[u8]) -> Option<T> {
+    let (front, rest) = T::read_from_prefix(bytes).ok()?;
+    *bytes = rest;
+    Some(front)
 }
 
 /// Removes a slice of `N` from the front of `bytes` and copies
@@ -116,9 +93,16 @@ pub(crate) fn system_time_to_asn1_time(
     Asn1Time::from_unix(t).map_err(|_| FailedToConvertToAsn1Time)
 }
 
+pub(crate) fn get_sw_advisories(enclave_id: &[u8]) -> &[&str] {
+    ACCEPTABLE_SW_ADVISORIES
+        .get(&enclave_id)
+        .unwrap_or(&DEFAULT_SW_ADVISORIES)
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::endian::{UInt16LE, UInt32LE, UInt64LE};
 
     #[test]
     fn test_strip_trailing_null_byte() {
@@ -137,11 +121,25 @@ mod test {
     }
 
     #[test]
-    fn test_read_u64_le() {
-        let mut one: &[u8] = &[1u8, 0, 0, 0, 0, 0, 0, 0];
+    fn test_read_from_bytes() {
+        let mut input: &[u8] = &[1u8, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 3, 0];
+        #[derive(Debug, PartialEq, zerocopy::FromBytes)]
+        #[repr(C)]
+        struct Values {
+            one: UInt64LE,
+            two: UInt32LE,
+            three: UInt16LE,
+        }
 
-        assert_eq!(1, read_u64_le(&mut one));
-        assert_eq!(0, one.len());
+        assert_eq!(
+            Some(Values {
+                one: 1.into(),
+                two: 2.into(),
+                three: 3.into(),
+            }),
+            read_from_bytes(&mut input)
+        );
+        assert_eq!(input, &[] as &[u8]);
     }
 
     #[test]

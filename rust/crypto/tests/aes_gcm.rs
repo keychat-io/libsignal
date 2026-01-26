@@ -3,16 +3,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use hex_literal::hex;
-use rand::Rng;
-use serde::Deserialize;
 use std::collections::HashMap;
 
-#[allow(dead_code)]
+use const_str::hex;
+use rand::{Rng, TryRngCore as _};
+use serde::Deserialize;
+
 #[derive(Deserialize, Debug)]
 struct WycheproofTest {
     #[serde(rename = "tcId")]
+    #[expect(dead_code)]
     tc_id: usize,
+    #[expect(dead_code)]
     comment: String,
     key: String,
     #[serde(rename = "iv")]
@@ -23,10 +25,10 @@ struct WycheproofTest {
     ct: String,
     tag: String,
     result: String,
+    #[expect(dead_code)]
     flags: Vec<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 struct WycheproofTestGroup {
     #[serde(rename = "ivSize")]
@@ -36,27 +38,32 @@ struct WycheproofTestGroup {
     #[serde(rename = "tagSize")]
     tag_size: usize,
     #[serde(rename = "type")]
+    #[expect(dead_code)]
     typ: String,
     tests: Vec<WycheproofTest>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 struct WycheproofTestSet {
     algorithm: String,
     #[serde(rename = "generatorVersion")]
+    #[expect(dead_code)]
     generator_version: String,
     #[serde(rename = "numberOfTests")]
+    #[expect(dead_code)]
     number_of_tests: usize,
+    #[expect(dead_code)]
     header: Vec<String>,
+    #[expect(dead_code)]
     notes: HashMap<String, String>,
+    #[expect(dead_code)]
     schema: String,
     #[serde(rename = "testGroups")]
     test_groups: Vec<WycheproofTestGroup>,
 }
 
 fn test_kat(kat: WycheproofTest) -> Result<(), signal_crypto::Error> {
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rngs::OsRng.unwrap_err();
 
     let key = hex::decode(kat.key).expect("valid hex");
     let aad = hex::decode(kat.aad).expect("valid hex");
@@ -68,7 +75,7 @@ fn test_kat(kat: WycheproofTest) -> Result<(), signal_crypto::Error> {
     let valid = match kat.result.as_ref() {
         "valid" => true,
         "invalid" => false,
-        wut => panic!("unknown result field {}", wut),
+        wut => panic!("unknown result field {wut}"),
     };
 
     let mut gcm_enc = signal_crypto::Aes256GcmEncryption::new(&key, &nonce, &aad)?;
@@ -88,7 +95,7 @@ fn test_kat(kat: WycheproofTest) -> Result<(), signal_crypto::Error> {
         assert_eq!(hex::encode(&buf), hex::encode(&pt));
 
         for i in 2..32 {
-            println!("Test {}", i);
+            println!("Test {i}");
             // Do it again but with split inputs:
             let mut gcm_enc = signal_crypto::Aes256GcmEncryption::new(&key, &nonce, &aad)?;
             let mut gcm_dec = signal_crypto::Aes256GcmDecryption::new(&key, &nonce, &aad)?;
@@ -100,7 +107,7 @@ fn test_kat(kat: WycheproofTest) -> Result<(), signal_crypto::Error> {
             while processed != buf.len() {
                 let remaining = buf.len() - processed;
                 let this_time = if remaining > 1 {
-                    rng.gen_range(1..remaining)
+                    rng.random_range(1..remaining)
                 } else {
                     remaining
                 };
@@ -152,9 +159,13 @@ fn aes_gcm_wycheproof_kats() -> Result<(), signal_crypto::Error> {
 fn aes_gcm_smoke_test() -> Result<(), signal_crypto::Error> {
     let key = hex!("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308");
     let nonce = hex!("cafebabefacedbaddecaf888");
-    let input = hex!("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39");
+    let input = hex!(
+        "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39"
+    );
     let ad = hex!("feedfacedeadbeeffeedfacedeadbeefabaddad2");
-    let output = hex!("522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f66276fc6ece0f4e1768cddf8853bb2d551b");
+    let output = hex!(
+        "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f66276fc6ece0f4e1768cddf8853bb2d551b"
+    );
 
     let mut aes_gcm = signal_crypto::Aes256GcmEncryption::new(&key, &nonce, &ad)?;
 

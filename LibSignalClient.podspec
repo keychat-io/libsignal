@@ -5,7 +5,7 @@
 
 Pod::Spec.new do |s|
   s.name             = 'LibSignalClient'
-  s.version          = '0.41.0'
+  s.version          = '0.86.13'
   s.summary          = 'A Swift wrapper library for communicating with the Signal messaging service.'
 
   s.homepage         = 'https://github.com/signalapp/libsignal'
@@ -14,18 +14,17 @@ Pod::Spec.new do |s|
   s.source           = { :git => 'https://github.com/signalapp/libsignal.git', :tag => "v#{s.version}" }
 
   s.swift_version    = '5'
-  s.platform         = :ios, '13.0'
-
-  s.dependency 'SignalCoreKit'
+  s.platform         = :ios, '15.0'
+  s.libraries        = ['z']
 
   s.source_files = ['swift/Sources/**/*.swift', 'swift/Sources/**/*.m']
   s.preserve_paths = [
     'swift/Sources/SignalFfi',
     'bin/fetch_archive.py',
-    'acknowledgments/acknowledgments.plist',
+    'acknowledgments/acknowledgments-ios.plist',
   ]
 
-  s.pod_target_xcconfig = {
+  pod_target_xcconfig = {
       'HEADER_SEARCH_PATHS' => '$(PODS_TARGET_SRCROOT)/swift/Sources/SignalFfi',
       # Duplicate this here to make sure the search path is passed on to Swift dependencies.
       'SWIFT_INCLUDE_PATHS' => '$(HEADER_SEARCH_PATHS)',
@@ -44,6 +43,7 @@ Pod::Spec.new do |s|
 
       'CARGO_BUILD_TARGET[sdk=iphonesimulator*][arch=arm64]' => 'aarch64-apple-ios-sim',
       'CARGO_BUILD_TARGET[sdk=iphonesimulator*][arch=*]' => 'x86_64-apple-ios',
+      'CARGO_BUILD_TARGET[sdk=iphoneos*][arch=arm64e]' => 'arm64e-apple-ios',
       'CARGO_BUILD_TARGET[sdk=iphoneos*]' => 'aarch64-apple-ios',
       # Presently, there's no special SDK or arch for maccatalyst,
       # so we need to hackily use the "IS_MACCATALYST" build flag
@@ -59,9 +59,22 @@ Pod::Spec.new do |s|
       'ARCHS[sdk=iphoneos*]' => 'arm64',
   }
 
+  if ENV['LIBSIGNAL_TESTING_ONLY_ACTIVE_ARCH']
+    pod_target_xcconfig['ONLY_ACTIVE_ARCH'] = 'YES'
+
+    s.user_target_xcconfig = { 'ONLY_ACTIVE_ARCH' => 'YES' }
+  end
+
+  s.pod_target_xcconfig = pod_target_xcconfig
+
   s.script_phases = [
-    { name: 'Download and cache libsignal-ffi',
+    { name: 'Download libsignal-ffi if not in cache',
       execution_position: :before_compile,
+      # It's not *ideal* to check the cache every build, but it's usually just a shasum.
+      # It might be possible to rely on the relative mtimes of the podspec and the fetched archive,
+      # but I wouldn't want to risk a mismatched archive giving us cryptic errors at link or run
+      # time later. This Is Fine.
+      always_out_of_date: '1',
       script: %q(
         set -euo pipefail
         if [ -e "${PODS_TARGET_SRCROOT}/swift/build_ffi.sh" ]; then
@@ -80,7 +93,7 @@ Pod::Spec.new do |s|
         rm -rf "${LIBSIGNAL_FFI_TEMP_DIR}"
         if [ -e "${PODS_TARGET_SRCROOT}/swift/build_ffi.sh" ]; then
           # Local development
-          ln -fhs "${PODS_TARGET_SRCROOT}" "${LIBSIGNAL_FFI_TEMP_DIR}"
+          ln -fns "${PODS_TARGET_SRCROOT}" "${LIBSIGNAL_FFI_TEMP_DIR}"
         elif [ -e "${SCRIPT_INPUT_FILE_0}" ]; then
           mkdir -p "${LIBSIGNAL_FFI_TEMP_DIR}"
           cd "${LIBSIGNAL_FFI_TEMP_DIR}"
@@ -98,9 +111,16 @@ Pod::Spec.new do |s|
     test_spec.preserve_paths = [
       'swift/Tests/*/Resources',
     ]
-    test_spec.pod_target_xcconfig = {
+    test_pod_target_xcconfig = {
       # Don't also link into the test target.
       'LIBSIGNAL_FFI_LIB_TO_LINK' => '',
+    }
+    test_spec.pod_target_xcconfig = test_pod_target_xcconfig
+
+    # Ideally we'd do this at run time, not configuration time, but CocoaPods doesn't make that easy.
+    # This is good enough.
+    test_spec.scheme = {
+      environment_variables: ENV.select { |name, value| name.start_with?('LIBSIGNAL_TESTING_') }
     }
   end
 end

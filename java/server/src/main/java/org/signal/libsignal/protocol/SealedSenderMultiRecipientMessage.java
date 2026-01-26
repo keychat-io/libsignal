@@ -7,12 +7,14 @@ package org.signal.libsignal.protocol;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
+import kotlin.Pair;
+import org.signal.libsignal.internal.CalledFromNative;
 import org.signal.libsignal.internal.Native;
-import org.signal.libsignal.protocol.util.Pair;
 
 /**
  * A parsed Sealed Sender v2 "SentMessage", ready to be fanned out to multiple recipients.
@@ -23,7 +25,7 @@ import org.signal.libsignal.protocol.util.Pair;
 public class SealedSenderMultiRecipientMessage {
   private final byte[] fullMessageData;
   private final Map<ServiceId, Recipient> recipients;
-  private final ServiceId[] excludedRecipients;
+  private final List<ServiceId> excludedRecipients;
   private final int offsetOfSharedData;
 
   /**
@@ -39,6 +41,7 @@ public class SealedSenderMultiRecipientMessage {
     // the length of the recipient-specific key material on the Java side.
     private final int lengthOfRecipientSpecificKeyMaterial;
 
+    @CalledFromNative
     private Recipient(
         byte[] devices,
         short[] registrationIds,
@@ -100,7 +103,7 @@ public class SealedSenderMultiRecipientMessage {
    * Parses the input as an SSv2 SentMessage.
    *
    * <p>The input is kept alive as long as the result is; it's used to implement {@link
-   * #messageForRecipient}.
+   * #messageForRecipient} and {@link #serialized}.
    *
    * @throws InvalidVersionException if the <em>major</em> version of the sealed sender message is
    *     unrecognized
@@ -112,15 +115,25 @@ public class SealedSenderMultiRecipientMessage {
         Native.SealedSender_MultiRecipientParseSentMessage(input);
   }
 
+  @CalledFromNative
   private SealedSenderMultiRecipientMessage(
       byte[] fullMessageData,
       Map<ServiceId, Recipient> recipients,
-      ServiceId[] excludedRecipients,
+      List<ServiceId> excludedRecipients,
       int offsetOfSharedData) {
     this.fullMessageData = fullMessageData;
     this.recipients = recipients;
     this.excludedRecipients = excludedRecipients;
     this.offsetOfSharedData = offsetOfSharedData;
+  }
+
+  /**
+   * Returns the serialized full message data.
+   *
+   * <p>The result is returned by reference; mutate it at your own detriment.
+   */
+  public byte[] serialized() {
+    return fullMessageData;
   }
 
   /**
@@ -148,7 +161,7 @@ public class SealedSenderMultiRecipientMessage {
    * <p>The result is returned by reference; mutate it at your own detriment.
    */
   public List<ServiceId> getExcludedRecipients() {
-    return Arrays.asList(excludedRecipients);
+    return excludedRecipients;
   }
 
   /**
@@ -177,5 +190,73 @@ public class SealedSenderMultiRecipientMessage {
     return 1 /* version signature */
         + recipient.lengthOfRecipientSpecificKeyMaterial
         + lengthOfSharedData;
+  }
+
+  private static final byte SERIALIZED_RECIPIENT_VIEW_VERSION = 0x01;
+  private static final byte[] ZERO_DEVICE_IDS = new byte[0];
+  private static final short[] ZERO_REGISTRATION_IDS = new short[0];
+
+  /**
+   * Returns a serialized view for a particular {@link Recipient}.
+   *
+   * <p>This may be used to optimize temporary storage for future delivery&mdash;a single copy of
+   * the serialized message may be stored, and the full recipient list will not need to be reparsed
+   * to deliver to a single recipient.
+   *
+   * @see #serialized()
+   * @see #messageForRecipient(byte[], byte[])
+   */
+  public byte[] serializedRecipientView(Recipient recipient) {
+    final ByteBuffer bbuf = ByteBuffer.allocate(1 + 4 + 4 + 4);
+    bbuf.put(SERIALIZED_RECIPIENT_VIEW_VERSION);
+    bbuf.putInt(offsetOfSharedData);
+    bbuf.putInt(recipient.offsetOfRecipientSpecificKeyMaterial);
+    bbuf.putInt(recipient.lengthOfRecipientSpecificKeyMaterial);
+    assert !bbuf.hasRemaining();
+    return bbuf.array();
+  }
+
+  /**
+   * Returns the Sealed Sender V2 "ReceivedMessage" payload for delivery to a particular recipient
+   * from its serialized view.
+   *
+   * <p>The same payload should be sent to all the recipient's devices.
+   *
+   * @see #serializedRecipientView(Recipient)
+   */
+  public static byte[] messageForRecipient(byte[] fullMessageData, byte[] serializedRecipientView)
+      throws InvalidVersionException {
+
+    if (serializedRecipientView.length != 13) {
+      throw new IllegalArgumentException(
+          "Invalid length for serialized view: " + serializedRecipientView.length);
+    }
+
+    final ByteBuffer wrapped = ByteBuffer.wrap(serializedRecipientView);
+    final byte version = wrapped.get();
+
+    if (version != SERIALIZED_RECIPIENT_VIEW_VERSION) {
+      throw new InvalidVersionException("Recipient view version " + version + " is not supported");
+    }
+
+    final int offsetOfSharedData = wrapped.getInt();
+    final int offsetOfRecipientSpecificKeyMaterial = wrapped.getInt();
+    final int lengthOfRecipientSpecificKeyMaterial = wrapped.getInt();
+
+    assert !wrapped.hasRemaining();
+
+    // Device, registration, and excluded service IDs aren't used or checked in this path, so we can
+    // use empty arrays.
+    final Recipient recipient =
+        new Recipient(
+            ZERO_DEVICE_IDS,
+            ZERO_REGISTRATION_IDS,
+            offsetOfRecipientSpecificKeyMaterial,
+            lengthOfRecipientSpecificKeyMaterial);
+    final SealedSenderMultiRecipientMessage message =
+        new SealedSenderMultiRecipientMessage(
+            fullMessageData, Collections.emptyMap(), Collections.emptyList(), offsetOfSharedData);
+
+    return message.messageForRecipient(recipient);
   }
 }

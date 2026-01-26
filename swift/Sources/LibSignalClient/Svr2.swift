@@ -16,18 +16,18 @@ public class Svr2Client: SgxClient {
         attestationMessage: some ContiguousBytes,
         currentDate: Date
     ) throws {
-        let handle: OpaquePointer? = try attestationMessage.withUnsafeBorrowedBuffer { attestationMessageBuffer in
+        let handle = try attestationMessage.withUnsafeBorrowedBuffer { attestationMessageBuffer in
             try mrenclave.withUnsafeBorrowedBuffer { mrenclaveBuffer in
-                var result: OpaquePointer?
-                try checkError(signal_svr2_client_new(
-                    &result,
-                    mrenclaveBuffer,
-                    attestationMessageBuffer,
-                    UInt64(currentDate.timeIntervalSince1970 * 1000)
-                ))
-                return result
+                try invokeFnReturningValueByPointer(.init()) {
+                    signal_svr2_client_new(
+                        $0,
+                        mrenclaveBuffer,
+                        attestationMessageBuffer,
+                        UInt64(currentDate.timeIntervalSince1970 * 1000)
+                    )
+                }
             }
         }
-        self.init(owned: handle!)
+        self.init(owned: NonNull(handle)!)
     }
 }

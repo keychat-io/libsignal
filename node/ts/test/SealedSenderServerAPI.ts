@@ -4,11 +4,14 @@
 //
 
 import { assert } from 'chai';
+import { Buffer } from 'node:buffer';
+
 import {
   Recipient,
   default as SealedSenderMultiRecipientMessage,
-} from '../SealedSenderMultiRecipientMessage';
-import * as util from './util';
+} from '../SealedSenderMultiRecipientMessage.js';
+import * as util from './util.js';
+import { assertArrayEquals } from './util.js';
 
 util.initLogger();
 
@@ -47,10 +50,7 @@ function assertMessageForRecipient(
   ...expectedHexParts: string[]
 ): void {
   const expected = bufferFromHexStrings(...expectedHexParts);
-  assert.deepEqual(
-    message.messageForRecipient(recipient).toString('hex'),
-    expected.toString('hex')
-  );
+  assertArrayEquals(expected, message.messageForRecipient(recipient));
 }
 
 describe('SealedSenderMultiRecipientMessage', () => {
@@ -248,8 +248,14 @@ describe('SealedSenderMultiRecipientMessage', () => {
   });
 
   it('rejects unknown versions', () => {
-    assert.throws(() => new SealedSenderMultiRecipientMessage(Buffer.of(0x11)));
-    assert.throws(() => new SealedSenderMultiRecipientMessage(Buffer.of(0x2f)));
-    assert.throws(() => new SealedSenderMultiRecipientMessage(Buffer.of(0x77)));
+    assert.throws(
+      () => new SealedSenderMultiRecipientMessage(Uint8Array.of(0x11))
+    );
+    assert.throws(
+      () => new SealedSenderMultiRecipientMessage(Uint8Array.of(0x2f))
+    );
+    assert.throws(
+      () => new SealedSenderMultiRecipientMessage(Uint8Array.of(0x77))
+    );
   });
 });

@@ -4,97 +4,152 @@
 //
 
 use std::marker::PhantomData;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use attest::svr2::RaftConfig;
-use attest::{cds2, enclave, nitro};
+use attest::{cds2, enclave};
 use derive_where::derive_where;
 use http::uri::PathAndQuery;
-
-use crate::env::{DomainConfig, Svr3Env};
-use crate::infra::connection_manager::{
-    MultiRouteConnectionManager, SingleRouteThrottlingConnectionManager,
+use libsignal_net_infra::errors::{LogSafeDisplay, RetryLater};
+use libsignal_net_infra::extract_retry_later;
+use libsignal_net_infra::route::{
+    DirectTcpRouteProvider, DomainFrontRouteProvider, HttpsProvider, TlsRouteProvider,
+    WebSocketProvider, WebSocketRouteFragment,
 };
-use crate::infra::ws::{AttestedConnection, WebSocketClientConnector};
-use crate::infra::{make_ws_config, ConnectionParams, EndpointConnection, TransportConnector};
+use libsignal_net_infra::ws::attested::{
+    AttestedConnection, AttestedConnectionError, AttestedProtocolError,
+};
+use libsignal_net_infra::ws::{self, WebSocketConnectError, WebSocketError};
+
+use crate::env::{DomainConfig, SvrBEnv};
+use crate::infra::{EnableDomainFronting, EnforceMinimumTls, OverrideNagleAlgorithm};
 use crate::svr::SvrConnection;
+use crate::ws::WebSocketServiceConnectError;
+
+pub trait AsRaftConfig<'a> {
+    fn as_raft_config(&self) -> Option<&'a RaftConfig>;
+}
+
+impl<'a> AsRaftConfig<'a> for () {
+    fn as_raft_config(&self) -> Option<&'a RaftConfig> {
+        None
+    }
+}
+
+impl<'a> AsRaftConfig<'a> for &'a RaftConfig {
+    fn as_raft_config(&self) -> Option<&'a RaftConfig> {
+        Some(self)
+    }
+}
 
 pub trait EnclaveKind {
+    type RaftConfigType: AsRaftConfig<'static> + Clone + Sync + Send;
     fn url_path(enclave: &[u8]) -> PathAndQuery;
 }
-pub trait Svr3Flavor: EnclaveKind {}
+
+pub trait SvrBFlavor: EnclaveKind {}
 
 pub enum Cdsi {}
 
-pub enum Sgx {}
-
-pub enum Nitro {}
+pub enum SvrSgx {}
 
 impl EnclaveKind for Cdsi {
+    type RaftConfigType = ();
     fn url_path(enclave: &[u8]) -> PathAndQuery {
-        PathAndQuery::try_from(format!("/v1/{}/discovery", hex::encode(enclave))).unwrap()
+        PathAndQuery::try_from(format!("/v1/{}/discovery", hex::encode(enclave)))
+            .expect("valid path")
     }
 }
 
-impl EnclaveKind for Sgx {
+impl EnclaveKind for SvrSgx {
+    type RaftConfigType = &'static RaftConfig;
     fn url_path(enclave: &[u8]) -> PathAndQuery {
-        PathAndQuery::try_from(format!("/v1/{}", hex::encode(enclave))).unwrap()
+        PathAndQuery::try_from(format!("/v1/{}", hex::encode(enclave))).expect("valid path")
     }
 }
 
-impl EnclaveKind for Nitro {
-    fn url_path(enclave: &[u8]) -> PathAndQuery {
-        PathAndQuery::try_from(format!(
-            "/v1/{}",
-            std::str::from_utf8(enclave).expect("valid utf8")
-        ))
-        .unwrap()
+impl SvrBFlavor for SvrSgx {}
+
+/// Log-safe human-readable label for a connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionLabel(String);
+
+pub type LabeledConnection = (AttestedConnection, ConnectionLabel);
+
+pub trait IntoConnectionResults {
+    type ConnectionResults: ArrayIsh<Result<LabeledConnection, Error>> + Send;
+    fn into_connection_results(self) -> Self::ConnectionResults;
+}
+
+/// Provides an [`AttestedConnection`] with a label for logging.
+///
+/// This trait provides useful indirection by allowing us to implement
+/// [`IntoConnectionResults`] for heterogeneous tuples with types that implement
+/// this trait.
+pub trait IntoAttestedConnection {
+    fn into_labeled_connection(self) -> LabeledConnection;
+}
+
+impl IntoAttestedConnection for LabeledConnection {
+    fn into_labeled_connection(self) -> LabeledConnection {
+        self
     }
 }
 
-impl Svr3Flavor for Sgx {}
-
-impl Svr3Flavor for Nitro {}
-
-pub trait IntoConnections {
-    type Connections: ArrayIsh<AttestedConnection> + Send;
-    fn into_connections(self) -> Self::Connections;
-}
-
-impl<A> IntoConnections for A
+impl<A> IntoConnectionResults for Result<A, Error>
 where
-    A: Into<AttestedConnection>,
+    A: IntoAttestedConnection,
 {
-    type Connections = [AttestedConnection; 1];
-    fn into_connections(self) -> Self::Connections {
-        [self.into()]
+    type ConnectionResults = [Result<LabeledConnection, Error>; 1];
+    fn into_connection_results(self) -> Self::ConnectionResults {
+        [self.map(IntoAttestedConnection::into_labeled_connection)]
     }
 }
 
-impl<A, B> IntoConnections for (A, B)
+impl<A, B> IntoConnectionResults for (Result<A, Error>, Result<B, Error>)
 where
-    A: Into<AttestedConnection>,
-    B: Into<AttestedConnection>,
+    A: IntoAttestedConnection,
+    B: IntoAttestedConnection,
 {
-    type Connections = [AttestedConnection; 2];
-    fn into_connections(self) -> Self::Connections {
-        [self.0.into(), self.1.into()]
+    type ConnectionResults = [Result<LabeledConnection, Error>; 2];
+    fn into_connection_results(self) -> Self::ConnectionResults {
+        [
+            self.0.map(IntoAttestedConnection::into_labeled_connection),
+            self.1.map(IntoAttestedConnection::into_labeled_connection),
+        ]
     }
 }
 
-impl<A, B, C> IntoConnections for (A, B, C)
+impl<A, B, C> IntoConnectionResults for (Result<A, Error>, Result<B, Error>, Result<C, Error>)
 where
-    A: Into<AttestedConnection>,
-    B: Into<AttestedConnection>,
-    C: Into<AttestedConnection>,
+    A: IntoAttestedConnection,
+    B: IntoAttestedConnection,
+    C: IntoAttestedConnection,
 {
-    type Connections = [AttestedConnection; 3];
-    fn into_connections(self) -> Self::Connections {
-        [self.0.into(), self.1.into(), self.2.into()]
+    type ConnectionResults = [Result<LabeledConnection, Error>; 3];
+    fn into_connection_results(self) -> Self::ConnectionResults {
+        [
+            self.0.map(IntoAttestedConnection::into_labeled_connection),
+            self.1.map(IntoAttestedConnection::into_labeled_connection),
+            self.2.map(IntoAttestedConnection::into_labeled_connection),
+        ]
     }
 }
 
-pub trait ArrayIsh<T>: AsRef<[T]> + AsMut<[T]> {
+impl ConnectionLabel {
+    pub fn from_log_safe(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl LogSafeDisplay for ConnectionLabel {}
+impl std::fmt::Display for ConnectionLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+pub trait ArrayIsh<T>: AsRef<[T]> + IntoIterator<Item = T> {
     const N: usize;
 }
 
@@ -103,25 +158,27 @@ impl<T, const N: usize> ArrayIsh<T> for [T; N] {
 }
 
 pub trait PpssSetup {
-    type Connections: IntoConnections + Send;
+    type ConnectionResults: IntoConnectionResults + Send;
     type ServerIds: ArrayIsh<u64> + Send;
     const N: usize = Self::ServerIds::N;
     fn server_ids() -> Self::ServerIds;
 }
 
-impl PpssSetup for Svr3Env<'_> {
-    type Connections = (SvrConnection<Sgx>, SvrConnection<Nitro>);
-    type ServerIds = [u64; 2];
+impl PpssSetup for SvrBEnv<'_> {
+    type ConnectionResults = Result<SvrConnection<SvrSgx>, Error>;
+    type ServerIds = [u64; 1];
 
     fn server_ids() -> Self::ServerIds {
-        [1, 2]
+        [1]
     }
 }
 
 #[derive_where(Clone, Copy; Bytes)]
 pub struct MrEnclave<Bytes, E> {
     inner: Bytes,
-    enclave_kind: PhantomData<E>,
+    // Using fn instead of E directly so that `MrEnclave` implements `Send +
+    // Sync` even if `E` does not.
+    enclave_kind: PhantomData<fn(E) -> E>,
 }
 
 impl<Bytes, E: EnclaveKind> MrEnclave<Bytes, E> {
@@ -139,118 +196,141 @@ impl<Bytes: AsRef<[u8]>, S> AsRef<[u8]> for MrEnclave<Bytes, S> {
     }
 }
 
-#[derive_where(Copy, Clone)]
-pub struct EnclaveEndpoint<'a, E: EnclaveKind> {
-    pub domain_config: DomainConfig,
+#[derive_where(Clone)]
+pub struct EndpointParams<'a, E: EnclaveKind> {
     pub mr_enclave: MrEnclave<&'a [u8], E>,
+    pub raft_config: E::RaftConfigType,
 }
 
-pub trait NewHandshake {
+#[derive_where(Clone)]
+pub struct EnclaveEndpoint<'a, E: EnclaveKind> {
+    pub domain_config: DomainConfig,
+    pub ws_config: ws::Config,
+    pub params: EndpointParams<'a, E>,
+}
+
+pub trait NewHandshake: EnclaveKind + Sized {
     fn new_handshake(
         params: &EndpointParams<Self>,
         attestation_message: &[u8],
-    ) -> enclave::Result<enclave::Handshake>
-    where
-        Self: EnclaveKind + Sized;
+    ) -> enclave::Result<enclave::Handshake>;
 }
 
-pub struct EndpointParams<E: EnclaveKind> {
-    pub(crate) mr_enclave: MrEnclave<&'static [u8], E>,
-    pub(crate) raft_config_override: Option<&'static RaftConfig>,
+#[derive(Debug, thiserror::Error, displaydoc::Display)]
+pub enum Error {
+    /// Websocket error: {0}
+    WebSocketConnect(WebSocketConnectError),
+    /// {0}
+    RateLimited(RetryLater),
+    /// Network error: {0}
+    WebSocket(#[from] WebSocketError),
+    /// Protocol error after establishing a connection: {0}
+    Protocol(AttestedProtocolError),
+    /// Enclave attestation failed: {0}
+    AttestationError(attest::enclave::Error),
+    /// No connection attempts succeeded before timeout
+    AllConnectionAttemptsFailed,
 }
 
-impl<E: EnclaveKind> EndpointParams<E> {
-    pub const fn new(mr_enclave: MrEnclave<&'static [u8], E>) -> Self {
-        Self {
-            mr_enclave,
-            raft_config_override: None,
-        }
-    }
+impl LogSafeDisplay for Error {}
 
-    pub fn with_raft_override(mut self, raft_config: &'static RaftConfig) -> Self {
-        self.raft_config_override = Some(raft_config);
-        self
-    }
-}
-
-pub struct EnclaveEndpointConnection<E: EnclaveKind, C, T> {
-    pub(crate) endpoint_connection: EndpointConnection<C, WebSocketClientConnector<T>>,
-    pub(crate) params: EndpointParams<E>,
-}
-
-impl<E: EnclaveKind, T: TransportConnector>
-    EnclaveEndpointConnection<E, SingleRouteThrottlingConnectionManager, T>
-{
-    pub fn new(
-        endpoint: EnclaveEndpoint<'static, E>,
-        connect_timeout: Duration,
-        transport_connector: T,
-    ) -> Self {
-        Self::with_custom_properties(endpoint, connect_timeout, transport_connector, None)
-    }
-
-    pub fn with_custom_properties(
-        endpoint: EnclaveEndpoint<'static, E>,
-        connect_timeout: Duration,
-        transport_connector: T,
-        raft_config_override: Option<&'static RaftConfig>,
-    ) -> Self {
-        Self {
-            endpoint_connection: EndpointConnection {
-                manager: SingleRouteThrottlingConnectionManager::new(
-                    endpoint.domain_config.connection_params(),
-                    connect_timeout,
-                ),
-                connector: WebSocketClientConnector::new(
-                    transport_connector,
-                    make_ws_config(E::url_path(endpoint.mr_enclave.as_ref()), connect_timeout),
-                ),
-            },
-            params: EndpointParams {
-                mr_enclave: endpoint.mr_enclave,
-                raft_config_override,
-            },
+impl From<AttestedConnectionError> for Error {
+    fn from(value: AttestedConnectionError) -> Self {
+        match value {
+            AttestedConnectionError::WebSocket(net) => Self::WebSocket(net),
+            AttestedConnectionError::Protocol(error) => Self::Protocol(error),
+            AttestedConnectionError::Attestation(err) => Self::AttestationError(err),
         }
     }
 }
 
-impl<E: EnclaveKind, T: TransportConnector>
-    EnclaveEndpointConnection<E, MultiRouteConnectionManager, T>
-{
-    pub fn new_multi(
-        mr_enclave: MrEnclave<&'static [u8], E>,
-        connection_params: impl IntoIterator<Item = ConnectionParams>,
-        connect_timeout: Duration,
-        transport_connector: T,
-    ) -> Self {
-        let service_connector = WebSocketClientConnector::new(
-            transport_connector,
-            make_ws_config(E::url_path(mr_enclave.as_ref()), connect_timeout),
+impl From<WebSocketServiceConnectError> for Error {
+    fn from(value: WebSocketServiceConnectError) -> Self {
+        match value {
+            WebSocketServiceConnectError::RejectedByServer {
+                response,
+                received_at: _,
+            } => {
+                if response.status() == http::StatusCode::TOO_MANY_REQUESTS {
+                    if let Some(retry_later) = extract_retry_later(response.headers()) {
+                        return Self::RateLimited(retry_later);
+                    }
+                }
+                Self::WebSocket(WebSocketError::Http(response))
+            }
+            WebSocketServiceConnectError::Connect(e, _) => Self::WebSocketConnect(e),
+        }
+    }
+}
+
+impl<E: EnclaveKind> EnclaveEndpoint<'_, E> {
+    pub fn enclave_websocket_provider(
+        &self,
+        enable_domain_fronting: EnableDomainFronting,
+    ) -> WebSocketProvider<
+        HttpsProvider<DomainFrontRouteProvider, TlsRouteProvider<DirectTcpRouteProvider>>,
+    > {
+        let Self {
+            domain_config,
+            ws_config: _,
+            params,
+        } = self;
+        let http_provider = domain_config.connect.route_provider(
+            enable_domain_fronting,
+            OverrideNagleAlgorithm::UseSystemDefault,
         );
-        Self {
-            endpoint_connection: EndpointConnection::new_multi(
-                connection_params,
-                connect_timeout,
-                service_connector,
-            ),
-            params: EndpointParams {
-                mr_enclave,
-                raft_config_override: None,
-            },
-        }
+
+        let ws_fragment = WebSocketRouteFragment {
+            ws_config: Default::default(),
+            endpoint: E::url_path(params.mr_enclave.as_ref()),
+            headers: Default::default(),
+        };
+
+        WebSocketProvider::new(ws_fragment, http_provider)
+    }
+
+    pub fn enclave_websocket_provider_with_options(
+        &self,
+        enable_domain_fronting: EnableDomainFronting,
+        enforce_minimum_tls: EnforceMinimumTls,
+        override_nagle_algorithm: OverrideNagleAlgorithm,
+    ) -> WebSocketProvider<
+        HttpsProvider<DomainFrontRouteProvider, TlsRouteProvider<DirectTcpRouteProvider>>,
+    > {
+        let Self {
+            domain_config,
+            ws_config: _,
+            params,
+        } = self;
+        let http_provider = domain_config.connect.route_provider_with_options(
+            enable_domain_fronting,
+            enforce_minimum_tls,
+            override_nagle_algorithm,
+        );
+
+        let ws_fragment = WebSocketRouteFragment {
+            ws_config: Default::default(),
+            endpoint: E::url_path(params.mr_enclave.as_ref()),
+            headers: Default::default(),
+        };
+
+        WebSocketProvider::new(ws_fragment, http_provider)
     }
 }
 
-impl NewHandshake for Sgx {
+impl NewHandshake for SvrSgx {
     fn new_handshake(
         params: &EndpointParams<Self>,
         attestation_message: &[u8],
     ) -> enclave::Result<enclave::Handshake> {
-        attest::svr2::new_handshake_with_override(
+        attest::svr2::new_handshake(
             params.mr_enclave.as_ref(),
             attestation_message,
             SystemTime::now(),
-            params.raft_config_override,
+            params
+                .raft_config
+                .as_raft_config()
+                .expect("Raft config must be present for SGX"),
         )
     }
 }
@@ -264,20 +344,6 @@ impl NewHandshake for Cdsi {
             params.mr_enclave.as_ref(),
             attestation_message,
             SystemTime::now(),
-        )
-    }
-}
-
-impl NewHandshake for Nitro {
-    fn new_handshake(
-        params: &EndpointParams<Self>,
-        attestation_message: &[u8],
-    ) -> enclave::Result<enclave::Handshake> {
-        nitro::new_handshake(
-            params.mr_enclave.as_ref(),
-            attestation_message,
-            SystemTime::now(),
-            params.raft_config_override,
         )
     }
 }

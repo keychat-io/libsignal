@@ -5,23 +5,22 @@
 
 #![allow(non_snake_case)]
 
+use std::sync::LazyLock;
+
+use curve25519_dalek_signal::ristretto::RistrettoPoint;
+use partial_default::PartialDefault;
+use serde::{Deserialize, Serialize};
+use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
+use zkcredential::attributes::Attribute;
+
 use crate::common::errors::*;
 use crate::common::sho::*;
 use crate::common::simple_types::*;
 use crate::crypto::profile_key_struct;
-use curve25519_dalek::ristretto::RistrettoPoint;
-use partial_default::PartialDefault;
-use serde::{Deserialize, Serialize};
 
-use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
-
-use lazy_static::lazy_static;
-use zkcredential::attributes::Attribute;
-
-lazy_static! {
-    static ref SYSTEM_PARAMS: SystemParams =
-        crate::deserialize::<SystemParams>(&SystemParams::SYSTEM_HARDCODED).unwrap();
-}
+static SYSTEM_PARAMS: LazyLock<SystemParams> = LazyLock::new(|| {
+    crate::deserialize(&SystemParams::SYSTEM_HARDCODED).expect("valid hardcoded params")
+});
 
 #[derive(Copy, Clone, PartialEq, Eq, Serialize, Deserialize, PartialDefault)]
 pub struct SystemParams {
@@ -81,6 +80,7 @@ impl ProfileKeyEncryptionDomain {
         let (mask, candidates) = M4.decode_253_bits();
 
         let target_M3 = key_pair.a1.invert() * ciphertext.as_points()[0];
+        let seed_sho = profile_key_struct::ProfileKeyStruct::seed_M3();
 
         let mut retval: profile_key_struct::ProfileKeyStruct = PartialDefault::partial_default();
         let mut n_found = 0;
@@ -99,7 +99,8 @@ impl ProfileKeyEncryptionDomain {
                 if (j & 1) == 1 {
                     pk[31] |= 0x40;
                 }
-                let M3 = profile_key_struct::ProfileKeyStruct::calc_M3(pk, uid_bytes);
+                let M3 =
+                    profile_key_struct::ProfileKeyStruct::calc_M3(seed_sho.clone(), pk, uid_bytes);
                 let candidate_retval = profile_key_struct::ProfileKeyStruct { bytes: pk, M3, M4 };
                 let found = M3.ct_eq(&target_M3) & is_valid_fe;
                 retval.conditional_assign(&candidate_retval, found);
@@ -149,7 +150,7 @@ mod tests {
         assert!(ciphertext_bytes.len() == 64);
         let ciphertext2: Ciphertext = bincode::deserialize(&ciphertext_bytes).unwrap();
         assert!(ciphertext == ciphertext2);
-        println!("ciphertext_bytes = {:#x?}", ciphertext_bytes);
+        println!("ciphertext_bytes = {ciphertext_bytes:#x?}");
         assert!(
             ciphertext_bytes
                 == vec![
@@ -167,11 +168,8 @@ mod tests {
 
         let mut sho = Sho::new(b"Test_Repeated_ProfileKeyEnc/Dec", b"seed");
         for _ in 0..100 {
-            let mut uid_bytes: UidBytes = Default::default();
-            let mut profile_key_bytes: ProfileKeyBytes = Default::default();
-
-            uid_bytes.copy_from_slice(&sho.squeeze(UUID_LEN)[..]);
-            profile_key_bytes.copy_from_slice(&sho.squeeze(PROFILE_KEY_LEN)[..]);
+            let uid_bytes: UidBytes = sho.squeeze_as_array();
+            let profile_key_bytes: ProfileKeyBytes = sho.squeeze_as_array();
 
             let profile_key =
                 profile_key_struct::ProfileKeyStruct::new(profile_key_bytes, uid_bytes);

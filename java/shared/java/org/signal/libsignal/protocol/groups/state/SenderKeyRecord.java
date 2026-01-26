@@ -7,6 +7,7 @@ package org.signal.libsignal.protocol.groups.state;
 
 import static org.signal.libsignal.internal.FilterExceptions.filterExceptions;
 
+import org.signal.libsignal.internal.CalledFromNative;
 import org.signal.libsignal.internal.Native;
 import org.signal.libsignal.internal.NativeHandleGuard;
 import org.signal.libsignal.protocol.InvalidMessageException;
@@ -17,33 +18,25 @@ import org.signal.libsignal.protocol.InvalidMessageException;
  *
  * @author Moxie Marlinspike
  */
-public class SenderKeyRecord implements NativeHandleGuard.Owner {
-  private final long unsafeHandle;
-
+public class SenderKeyRecord extends NativeHandleGuard.SimpleOwner {
   @Override
-  @SuppressWarnings("deprecation")
-  protected void finalize() {
-    Native.SenderKeyRecord_Destroy(this.unsafeHandle);
+  protected void release(long nativeHandle) {
+    Native.SenderKeyRecord_Destroy(nativeHandle);
   }
 
-  public SenderKeyRecord(long unsafeHandle) {
-    this.unsafeHandle = unsafeHandle;
+  @CalledFromNative
+  public SenderKeyRecord(long nativeHandle) {
+    super(nativeHandle);
   }
 
   // FIXME: This shouldn't be considered a "message".
   public SenderKeyRecord(byte[] serialized) throws InvalidMessageException {
-    this.unsafeHandle =
+    super(
         filterExceptions(
-            InvalidMessageException.class, () -> Native.SenderKeyRecord_Deserialize(serialized));
+            InvalidMessageException.class, () -> Native.SenderKeyRecord_Deserialize(serialized)));
   }
 
   public byte[] serialize() {
-    try (NativeHandleGuard guard = new NativeHandleGuard(this)) {
-      return filterExceptions(() -> Native.SenderKeyRecord_GetSerialized(guard.nativeHandle()));
-    }
-  }
-
-  public long unsafeNativeHandleWithoutGuard() {
-    return this.unsafeHandle;
+    return filterExceptions(() -> guardedMapChecked(Native::SenderKeyRecord_GetSerialized));
   }
 }

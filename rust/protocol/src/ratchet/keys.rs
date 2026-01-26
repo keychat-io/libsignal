@@ -3,11 +3,82 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use arrayref::array_ref;
-
-use crate::{crypto, PrivateKey, PublicKey, Result};
 use std::fmt;
 
+use libsignal_core::derive_arrays;
+
+use crate::proto::storage::session_structure;
+use crate::{PrivateKey, PublicKey, Result, crypto};
+
+pub(crate) enum MessageKeyGenerator {
+    Keys(MessageKeys),
+    Seed((Vec<u8>, u32)),
+}
+
+impl MessageKeyGenerator {
+    pub(crate) fn new_from_seed(seed: &[u8], counter: u32) -> Self {
+        Self::Seed((seed.to_vec(), counter))
+    }
+    pub(crate) fn generate_keys(self, pqr_key: spqr::MessageKey) -> MessageKeys {
+        match self {
+            Self::Seed((seed, counter)) => {
+                MessageKeys::derive_keys(&seed, pqr_key.as_deref(), counter)
+            }
+            Self::Keys(k) => {
+                // PQR keys should only be set for newer sessions, and in
+                // newer sessions there should be only seed-based generators.
+                assert!(pqr_key.is_none());
+                k
+            }
+        }
+    }
+    pub(crate) fn into_pb(self) -> session_structure::chain::MessageKey {
+        match self {
+            Self::Keys(k) => session_structure::chain::MessageKey {
+                cipher_key: k.cipher_key().to_vec(),
+                mac_key: k.mac_key().to_vec(),
+                iv: k.iv().to_vec(),
+                index: k.counter(),
+                seed: vec![],
+            },
+            Self::Seed((seed, counter)) => session_structure::chain::MessageKey {
+                cipher_key: vec![],
+                mac_key: vec![],
+                iv: vec![],
+                index: counter,
+                seed,
+            },
+        }
+    }
+    pub(crate) fn from_pb(
+        pb: session_structure::chain::MessageKey,
+    ) -> std::result::Result<Self, &'static str> {
+        Ok(if pb.seed.is_empty() {
+            Self::Keys(MessageKeys {
+                cipher_key: pb
+                    .cipher_key
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "invalid message cipher key")?,
+                mac_key: pb
+                    .mac_key
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "invalid message MAC key")?,
+                iv: pb
+                    .iv
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "invalid message IV")?,
+                counter: pb.index,
+            })
+        } else {
+            Self::Seed((pb.seed, pb.index))
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct MessageKeys {
     cipher_key: [u8; 32],
     mac_key: [u8; 32],
@@ -16,21 +87,17 @@ pub(crate) struct MessageKeys {
 }
 
 impl MessageKeys {
-    pub(crate) fn derive_keys(input_key_material: &[u8], counter: u32) -> Self {
-        let mut okm = [0; 80];
-        hkdf::Hkdf::<sha2::Sha256>::new(None, input_key_material)
-            .expand(b"WhisperMessageKeys", &mut okm)
-            .expect("valid output length");
+    pub(crate) fn derive_keys(
+        input_key_material: &[u8],
+        optional_salt: Option<&[u8]>,
+        counter: u32,
+    ) -> Self {
+        let (cipher_key, mac_key, iv) = derive_arrays(|okm| {
+            hkdf::Hkdf::<sha2::Sha256>::new(optional_salt, input_key_material)
+                .expand(b"WhisperMessageKeys", okm)
+                .expect("valid output length")
+        });
 
-        MessageKeys {
-            cipher_key: *array_ref![okm, 0, 32],
-            mac_key: *array_ref![okm, 32, 32],
-            iv: *array_ref![okm, 64, 16],
-            counter,
-        }
-    }
-
-    pub(crate) fn new(cipher_key: [u8; 32], mac_key: [u8; 32], iv: [u8; 16], counter: u32) -> Self {
         MessageKeys {
             cipher_key,
             mac_key,
@@ -91,8 +158,8 @@ impl ChainKey {
         }
     }
 
-    pub(crate) fn message_keys(&self) -> MessageKeys {
-        MessageKeys::derive_keys(
+    pub(crate) fn message_keys(&self) -> MessageKeyGenerator {
+        MessageKeyGenerator::new_from_seed(
             &self.calculate_base_material(Self::MESSAGE_KEY_SEED),
             self.index,
         )
@@ -123,17 +190,16 @@ impl RootKey {
         our_ratchet_key: &PrivateKey,
     ) -> Result<(RootKey, ChainKey)> {
         let shared_secret = our_ratchet_key.calculate_agreement(their_ratchet_key)?;
-        let mut derived_secret_bytes = [0; 64];
-        hkdf::Hkdf::<sha2::Sha256>::new(Some(&self.key), &shared_secret)
-            .expand(b"WhisperRatchet", &mut derived_secret_bytes)
-            .expect("valid output length");
+        let (root_key, chain_key, []) = derive_arrays(|bytes| {
+            hkdf::Hkdf::<sha2::Sha256>::new(Some(&self.key), &shared_secret)
+                .expand(b"WhisperRatchet", bytes)
+                .expect("valid output length")
+        });
 
         Ok((
-            RootKey {
-                key: *array_ref![derived_secret_bytes, 0, 32],
-            },
+            RootKey { key: root_key },
             ChainKey {
-                key: *array_ref![derived_secret_bytes, 32, 32],
+                key: chain_key,
                 index: 0,
             },
         ))
@@ -175,13 +241,26 @@ mod tests {
 
         let chain_key = ChainKey::new(seed, 0);
         assert_eq!(&seed, chain_key.key());
-        assert_eq!(&message_key, chain_key.message_keys().cipher_key());
-        assert_eq!(&mac_key, chain_key.message_keys().mac_key());
+        assert_eq!(
+            &message_key,
+            chain_key.message_keys().generate_keys(None).cipher_key()
+        );
+        assert_eq!(
+            &mac_key,
+            chain_key.message_keys().generate_keys(None).mac_key()
+        );
         assert_eq!(&next_chain_key, chain_key.next_chain_key().key());
         assert_eq!(0, chain_key.index());
-        assert_eq!(0, chain_key.message_keys().counter());
+        assert_eq!(0, chain_key.message_keys().generate_keys(None).counter());
         assert_eq!(1, chain_key.next_chain_key().index());
-        assert_eq!(1, chain_key.next_chain_key().message_keys().counter());
+        assert_eq!(
+            1,
+            chain_key
+                .next_chain_key()
+                .message_keys()
+                .generate_keys(None)
+                .counter()
+        );
         Ok(())
     }
 }

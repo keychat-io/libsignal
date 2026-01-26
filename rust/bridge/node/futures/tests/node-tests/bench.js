@@ -5,20 +5,30 @@
 
 /* eslint-env es2017 */
 
-const Benchmark = require('benchmark');
+import Benchmark from 'benchmark';
+import { createRequire } from 'node:module';
 
+const require = createRequire(import.meta.url)
 const Native = require(process.env.SIGNAL_NEON_FUTURES_TEST_LIB);
 
-const suite = new Benchmark.Suite();
-suite
-  .add('await Native.incrementCallbackPromise(async () => 7)', {
-    defer: true,
-    fn: async deferred => {
-      await Native.incrementCallbackPromise(async () => 7);
-      deferred.resolve();
-    },
-  })
-  .on('cycle', event => {
-    console.log(String(event.target));
-  })
-  .run();
+async function singleIteration() {
+  await Native.incrementCallbackPromise(async () => 7);
+}
+
+if (process.env.SIGNAL_NEON_FUTURES_TEST_SMOKE_ONLY) {
+  await singleIteration();
+} else {
+  const suite = new Benchmark.Suite();
+  suite
+    .add('await Native.incrementCallbackPromise(async () => 7)', {
+      defer: true,
+      fn: async deferred => {
+        await singleIteration();
+        deferred.resolve();
+      },
+    })
+    .on('cycle', event => {
+      console.log(String(event.target));
+    })
+    .run();
+}

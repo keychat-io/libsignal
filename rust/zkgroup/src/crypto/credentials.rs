@@ -5,9 +5,13 @@
 
 #![allow(non_snake_case)]
 
-use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
-use curve25519_dalek::ristretto::RistrettoPoint;
-use curve25519_dalek::scalar::Scalar;
+use std::sync::LazyLock;
+
+use const_str::hex;
+use curve25519_dalek_signal::constants::RISTRETTO_BASEPOINT_POINT;
+use curve25519_dalek_signal::ristretto::RistrettoPoint;
+use curve25519_dalek_signal::scalar::Scalar;
+use derive_where::derive_where;
 use partial_default::PartialDefault;
 use serde::{Deserialize, Serialize};
 
@@ -23,13 +27,9 @@ use crate::{
     NUM_AUTH_CRED_ATTRIBUTES, NUM_PROFILE_KEY_CRED_ATTRIBUTES, NUM_RECEIPT_CRED_ATTRIBUTES,
 };
 
-use hex_literal::hex;
-use lazy_static::lazy_static;
-
-lazy_static! {
-    static ref SYSTEM_PARAMS: SystemParams =
-        crate::deserialize::<SystemParams>(SystemParams::SYSTEM_HARDCODED).unwrap();
-}
+static SYSTEM_PARAMS: LazyLock<SystemParams> = LazyLock::new(|| {
+    crate::deserialize(SystemParams::SYSTEM_HARDCODED).expect("valid hardcoded params")
+});
 
 const NUM_SUPPORTED_ATTRS: usize = 6;
 #[derive(Copy, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +91,7 @@ impl AttrScalars for PniCredential {
 
 #[derive(Serialize, Deserialize, PartialDefault)]
 #[partial_default(bound = "S::Storage: Default")]
+#[derive_where(Clone, Copy, PartialEq, Eq; S: AttrScalars)]
 pub struct KeyPair<S: AttrScalars> {
     // private
     pub(crate) w: Scalar,
@@ -105,44 +106,23 @@ pub struct KeyPair<S: AttrScalars> {
     pub(crate) I: RistrettoPoint,
 }
 
-impl<S: AttrScalars> Clone for KeyPair<S> {
-    fn clone(&self) -> Self {
-        // Rely on Copy
-        *self
-    }
-}
-
-impl<S: AttrScalars> Copy for KeyPair<S> {}
-
-impl<S: AttrScalars> PartialEq for KeyPair<S> {
-    fn eq(&self, other: &Self) -> bool {
-        self.w == other.w
-            && self.wprime == other.wprime
-            && self.W == other.W
-            && self.x0 == other.x0
-            && self.x1 == other.x1
-            && self.y == other.y
-            && self.C_W == other.C_W
-            && self.I == other.I
-    }
-}
-impl<S: AttrScalars> Eq for KeyPair<S> {}
-
 #[derive(Copy, Clone, PartialEq, Eq, Serialize, Deserialize, PartialDefault)]
 pub struct PublicKey {
     pub(crate) C_W: RistrettoPoint,
     pub(crate) I: RistrettoPoint,
 }
 
+/// Unused, kept only because ServerSecretParams contains a `KeyPair<AuthCredential>`.
 #[derive(Copy, Clone, PartialEq, Eq, Serialize, Deserialize, PartialDefault)]
-pub struct AuthCredential {
+pub(crate) struct AuthCredential {
     pub(crate) t: Scalar,
     pub(crate) U: RistrettoPoint,
     pub(crate) V: RistrettoPoint,
 }
 
+/// Unused, kept only because ServerSecretParams contains a `KeyPair<AuthCredentialWithPni>`.
 #[derive(Copy, Clone, PartialEq, Eq, Serialize, Deserialize, PartialDefault)]
-pub struct AuthCredentialWithPni {
+pub(crate) struct AuthCredentialWithPni {
     pub(crate) t: Scalar,
     pub(crate) U: RistrettoPoint,
     pub(crate) V: RistrettoPoint,
@@ -210,31 +190,6 @@ pub struct BlindedReceiptCredential {
     pub(crate) U: RistrettoPoint,
     pub(crate) S1: RistrettoPoint,
     pub(crate) S2: RistrettoPoint,
-}
-
-pub(crate) fn convert_to_points_uid_struct(
-    uid: uid_struct::UidStruct,
-    redemption_time: CoarseRedemptionTime,
-) -> Vec<RistrettoPoint> {
-    let system = SystemParams::get_hardcoded();
-    let redemption_time_scalar = encode_redemption_time(redemption_time);
-    vec![uid.M1, uid.M2, redemption_time_scalar * system.G_m3]
-}
-
-pub(crate) fn convert_to_points_aci_pni_timestamp(
-    aci: uid_struct::UidStruct,
-    pni: uid_struct::UidStruct,
-    redemption_time: Timestamp,
-) -> Vec<RistrettoPoint> {
-    let system = SystemParams::get_hardcoded();
-    let redemption_time_scalar = TimestampStruct::calc_m_from(redemption_time);
-    vec![
-        aci.M1,
-        aci.M2,
-        pni.M1,
-        pni.M2,
-        redemption_time_scalar * system.G_m5,
-    ]
 }
 
 pub(crate) fn convert_to_points_receipt_struct(
@@ -307,7 +262,9 @@ impl SystemParams {
         *SYSTEM_PARAMS
     }
 
-    const SYSTEM_HARDCODED: &'static [u8] = &hex!("9ae7c8e5ed779b114ae7708aa2f794670adda324987b659913122c35505b105e6ca31025d2d76be7fd34944f98f7fa0e37babb2c8b98bbbdbd3dd1bf130cca2c8a9a3bdfaaa2b6b322d46b93eca7b0d51c86a3c839e11466358258a6c10c577fc2bffd34cd99164c9a6cd29fab55d91ff9269322ec3458603cc96a0d47f704058288f62ee0acedb8aa23242121d98965a9bb2991250c11758095ece0fd2b33285286fe1fcb056103b6081744b975f550d08521568dd3d8618f25c140375a0f4024c3aa23bdfffb27fbd982208d3ecd1fd3bcb7ac0c3a14b109804fc748d7fa456cffb4934f980b6e09a248a60f44a6150ae6c13d7e3c06261d7e4eed37f39f60b04dd9d607fd357012274d3c63dbb38e7378599c9e97dfbb28842694891d5f0ddc729919b798b4131503408cc57a9c532f4427632c88f54cea53861a5bc44c61cc6037dc31c2e8d4474fb519587a448693182ad9d6d86b535957858f547b9340127da75f8074caee944ac36c0ac662d38c9b3ccce03a093fcd9644047398b86b6e83372ff14fb8bb0dea65531252ac70d58a4a0810d682a0e709c9227b30ef6c8e17c5915d527221bb00da8175cd6489aa8aa492a500f9abee5690b9dfca8855dc0bd02a7f277add240f639ac16801e81574afb4683edff63b9a01e93dbd867a04b616c706c80c756c11a3016bbfb60977f4648b5f2395a4b428b7211940813e3afde2b87aa9c2c37bf716e2578f95656df12c2fb6f5d0631f6f71e2c3193f6d");
+    const SYSTEM_HARDCODED: &'static [u8] = &hex!(
+        "9ae7c8e5ed779b114ae7708aa2f794670adda324987b659913122c35505b105e6ca31025d2d76be7fd34944f98f7fa0e37babb2c8b98bbbdbd3dd1bf130cca2c8a9a3bdfaaa2b6b322d46b93eca7b0d51c86a3c839e11466358258a6c10c577fc2bffd34cd99164c9a6cd29fab55d91ff9269322ec3458603cc96a0d47f704058288f62ee0acedb8aa23242121d98965a9bb2991250c11758095ece0fd2b33285286fe1fcb056103b6081744b975f550d08521568dd3d8618f25c140375a0f4024c3aa23bdfffb27fbd982208d3ecd1fd3bcb7ac0c3a14b109804fc748d7fa456cffb4934f980b6e09a248a60f44a6150ae6c13d7e3c06261d7e4eed37f39f60b04dd9d607fd357012274d3c63dbb38e7378599c9e97dfbb28842694891d5f0ddc729919b798b4131503408cc57a9c532f4427632c88f54cea53861a5bc44c61cc6037dc31c2e8d4474fb519587a448693182ad9d6d86b535957858f547b9340127da75f8074caee944ac36c0ac662d38c9b3ccce03a093fcd9644047398b86b6e83372ff14fb8bb0dea65531252ac70d58a4a0810d682a0e709c9227b30ef6c8e17c5915d527221bb00da8175cd6489aa8aa492a500f9abee5690b9dfca8855dc0bd02a7f277add240f639ac16801e81574afb4683edff63b9a01e93dbd867a04b616c706c80c756c11a3016bbfb60977f4648b5f2395a4b428b7211940813e3afde2b87aa9c2c37bf716e2578f95656df12c2fb6f5d0631f6f71e2c3193f6d"
+    );
 }
 
 impl<S: AttrScalars> KeyPair<S> {
@@ -315,8 +272,7 @@ impl<S: AttrScalars> KeyPair<S> {
         assert!(S::NUM_ATTRS >= 1, "at least one attribute required");
         assert!(
             S::NUM_ATTRS <= NUM_SUPPORTED_ATTRS,
-            "more than {} attributes not supported",
-            NUM_SUPPORTED_ATTRS
+            "more than {NUM_SUPPORTED_ATTRS} attributes not supported"
         );
         assert!(
             S::NUM_ATTRS <= S::Storage::LEN,
@@ -376,33 +332,6 @@ impl<S: AttrScalars> KeyPair<S> {
             V += yn * Mn;
         }
         (t, U, V)
-    }
-}
-
-impl KeyPair<AuthCredential> {
-    pub fn create_auth_credential(
-        &self,
-        uid: uid_struct::UidStruct,
-        redemption_time: CoarseRedemptionTime,
-        sho: &mut Sho,
-    ) -> AuthCredential {
-        let M = convert_to_points_uid_struct(uid, redemption_time);
-        let (t, U, V) = self.credential_core(&M, sho);
-        AuthCredential { t, U, V }
-    }
-}
-
-impl KeyPair<AuthCredentialWithPni> {
-    pub fn create_auth_credential_with_pni(
-        &self,
-        aci: uid_struct::UidStruct,
-        pni: uid_struct::UidStruct,
-        redemption_time: Timestamp,
-        sho: &mut Sho,
-    ) -> AuthCredentialWithPni {
-        let M = convert_to_points_aci_pni_timestamp(aci, pni, redemption_time);
-        let (t, U, V) = self.credential_core(&M, sho);
-        AuthCredentialWithPni { t, U, V }
     }
 }
 
@@ -494,10 +423,9 @@ impl BlindedReceiptCredentialWithSecretNonce {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::common::constants::*;
     use crate::crypto::proofs;
-
-    use super::*;
 
     #[test]
     fn test_system() {
@@ -508,25 +436,53 @@ mod tests {
 
     #[test]
     fn test_mac() {
+        // It doesn't really matter *which* credential we test here, we just want to generally know
+        // we've set things up correctly. (Also, the credentials hardcoded here in zkgroup may
+        // eventually all be superseded by implementations using zkcredential, at which point this
+        // test can be deleted.)
         let mut sho = Sho::new(b"Test_Credentials", b"");
-        let keypair = KeyPair::<AuthCredential>::generate(&mut sho);
+        let keypair = KeyPair::<ExpiringProfileKeyCredential>::generate(&mut sho);
 
         let uid_bytes = TEST_ARRAY_16;
-        let redemption_time = 37;
+        let redemption_time = Timestamp::from_epoch_seconds(37 * SECONDS_PER_DAY);
         let aci = libsignal_core::Aci::from_uuid_bytes(uid_bytes);
-        let uid = uid_struct::UidStruct::from_service_id(aci.into());
-        let credential = keypair.create_auth_credential(uid, redemption_time, &mut sho);
-        let proof = proofs::AuthCredentialIssuanceProof::new(
+        let aci_struct = uid_struct::UidStruct::from_service_id(aci.into());
+        let profile_key_struct = crate::crypto::profile_key_struct::ProfileKeyStruct::new(
+            [1; PROFILE_KEY_LEN],
+            uid_bytes,
+        );
+        let request_key_pair =
+            crate::crypto::profile_key_credential_request::KeyPair::generate(&mut sho);
+        let ciphertext = request_key_pair
+            .encrypt(profile_key_struct, &mut sho)
+            .get_ciphertext();
+        let credential = keypair.create_blinded_expiring_profile_key_credential(
+            aci_struct,
+            request_key_pair.get_public_key(),
+            ciphertext,
+            redemption_time,
+            &mut sho,
+        );
+        let proof = proofs::ExpiringProfileKeyCredentialIssuanceProof::new(
             keypair,
+            request_key_pair.get_public_key(),
+            ciphertext,
             credential,
-            uid,
+            aci_struct,
             redemption_time,
             &mut sho,
         );
 
         let public_key = keypair.get_public_key();
         proof
-            .verify(public_key, credential, uid, redemption_time)
+            .verify(
+                public_key,
+                request_key_pair.get_public_key(),
+                uid_bytes,
+                ciphertext,
+                credential.get_blinded_expiring_profile_key_credential(),
+                redemption_time,
+            )
             .unwrap();
 
         let keypair_bytes = bincode::serialize(&keypair).unwrap();
@@ -539,19 +495,15 @@ mod tests {
 
         let mac_bytes = bincode::serialize(&credential).unwrap();
 
-        println!("mac_bytes = {:#x?}", mac_bytes);
-        assert!(
-            mac_bytes
-                == vec![
-                    0xe0, 0xce, 0x21, 0xfe, 0xb7, 0xc3, 0xb8, 0x62, 0x3a, 0xe6, 0x20, 0xab, 0x3e,
-                    0xe6, 0x5d, 0x94, 0xa3, 0xf3, 0x40, 0x53, 0x31, 0x63, 0xd2, 0x4c, 0x5d, 0x41,
-                    0xa0, 0xd6, 0x7a, 0x40, 0xb3, 0x2, 0x8e, 0x50, 0xa2, 0x7b, 0xd4, 0xda, 0xe9,
-                    0x9d, 0x60, 0x0, 0xdb, 0x97, 0x3d, 0xbc, 0xc5, 0xad, 0xe1, 0x32, 0xbc, 0x56,
-                    0xb0, 0xe1, 0xac, 0x16, 0x7b, 0xb, 0x2c, 0x9, 0xe2, 0xb6, 0xc8, 0x5b, 0x68,
-                    0xc8, 0x8e, 0x7d, 0xfd, 0x58, 0x97, 0x51, 0xe9, 0x8, 0x1f, 0x81, 0xb0, 0x24,
-                    0xea, 0xa0, 0xaf, 0x29, 0x6, 0xed, 0xb3, 0x9, 0x32, 0xed, 0x65, 0x28, 0x2f,
-                    0xa1, 0x79, 0x9e, 0x1, 0x24,
-                ]
+        println!("mac_bytes = {}", hex::encode(&mac_bytes));
+        assert_eq!(
+            mac_bytes,
+            hex!(
+                "ef47110715831160100f14d1936f4349c45b80ccaacd4edd9f949375d2d90a090888d81f8b0ed313
+                808b5ff7ec1957ed4e8b3d9c195b3a5abdbdd3d972c29809100a7f8dc2354be7a1d44452cbadd87e
+                4851ae05ebeb2586b856d35af765883a94473ad855df8583be2930e4e1d5756175a9091f2be1d8d0
+                21280446a7611841d6b4f2eb165267a9d1d7a800f19c2077a4ef7df721b160fe200181be3c455f1c"
+            )
         );
     }
 }

@@ -7,17 +7,18 @@
 //!
 //! These implementations are purely in-memory, and therefore most likely useful for testing.
 
-use crate::storage::traits;
-use crate::{
-    IdentityKey, IdentityKeyPair, KyberPreKeyId, KyberPreKeyRecord, PreKeyId, PreKeyRecord,
-    ProtocolAddress, Result, SenderKeyRecord, SessionRecord, SignalProtocolError, SignedPreKeyId,
-    SignedPreKeyRecord,
-};
-
-use async_trait::async_trait;
 use std::borrow::Cow;
 use std::collections::HashMap;
+
+use async_trait::async_trait;
 use uuid::Uuid;
+
+use crate::storage::traits::{self, IdentityChange};
+use crate::{
+    CiphertextMessageType, IdentityKey, IdentityKeyPair, KyberPreKeyId, KyberPreKeyRecord,
+    PreKeyId, PreKeyRecord, ProtocolAddress, PublicKey, Result, SenderKeyRecord, SessionRecord,
+    SignalProtocolError, SignedPreKeyId, SignedPreKeyRecord,
+};
 
 /// Reference implementation of [traits::IdentityKeyStore].
 #[derive(Clone)]
@@ -60,18 +61,16 @@ impl traits::IdentityKeyStore for InMemIdentityKeyStore {
         &mut self,
         address: &ProtocolAddress,
         identity: &IdentityKey,
-    ) -> Result<bool> {
+    ) -> Result<IdentityChange> {
         match self.known_keys.get(address) {
             None => {
                 self.known_keys.insert(address.clone(), *identity);
-                Ok(false) // new key
+                Ok(IdentityChange::NewOrUnchanged)
             }
-            Some(k) if k == identity => {
-                Ok(false) // same key
-            }
+            Some(k) if k == identity => Ok(IdentityChange::NewOrUnchanged),
             Some(_k) => {
                 self.known_keys.insert(address.clone(), *identity);
-                Ok(true) // overwrite
+                Ok(IdentityChange::ReplacedExisting)
             }
         }
     }
@@ -195,10 +194,14 @@ impl traits::SignedPreKeyStore for InMemSignedPreKeyStore {
     }
 }
 
-/// Reference implementation of [traits::KyberPreKeyStore].
+/// Basic implementation of [traits::KyberPreKeyStore].
+///
+/// Note that this implementation does not clear any keys upon use! This is correct for last-resort
+/// keys, but a real client would normally have a set of one-time keys to use first.
 #[derive(Clone)]
 pub struct InMemKyberPreKeyStore {
     kyber_pre_keys: HashMap<KyberPreKeyId, KyberPreKeyRecord>,
+    base_keys_seen: HashMap<(KyberPreKeyId, SignedPreKeyId), Vec<PublicKey>>,
 }
 
 impl InMemKyberPreKeyStore {
@@ -206,6 +209,7 @@ impl InMemKyberPreKeyStore {
     pub fn new() -> Self {
         Self {
             kyber_pre_keys: HashMap::new(),
+            base_keys_seen: HashMap::new(),
         }
     }
 
@@ -241,7 +245,23 @@ impl traits::KyberPreKeyStore for InMemKyberPreKeyStore {
         Ok(())
     }
 
-    async fn mark_kyber_pre_key_used(&mut self, _kyber_prekey_id: KyberPreKeyId) -> Result<()> {
+    async fn mark_kyber_pre_key_used(
+        &mut self,
+        kyber_prekey_id: KyberPreKeyId,
+        ec_prekey_id: SignedPreKeyId,
+        base_key: &PublicKey,
+    ) -> Result<()> {
+        let base_keys_seen = self
+            .base_keys_seen
+            .entry((kyber_prekey_id, ec_prekey_id))
+            .or_default();
+        if base_keys_seen.contains(base_key) {
+            return Err(SignalProtocolError::InvalidMessage(
+                CiphertextMessageType::PreKey,
+                "reused base key",
+            ));
+        }
+        base_keys_seen.push(*base_key);
         Ok(())
     }
 }
@@ -308,93 +328,6 @@ impl traits::SessionStore for InMemSessionStore {
     }
 }
 
-/// Reference implementation of [traits::RatchetKeyStore].
-#[derive(Clone)]
-pub struct InMemRatchetKeyStore {
-    store: HashMap<String, Vec<String>>,
-}
-
-impl InMemRatchetKeyStore {
-    /// Create an empty session store.
-    pub fn new() -> Self {
-        Self {
-            store: HashMap::new(),
-        }
-    }
-}
-
-impl Default for InMemRatchetKeyStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait(?Send)]
-impl traits::RatchetKeyStore for InMemRatchetKeyStore {
-    async fn load_ratchet_key(&self, their_ephemeral_public: String) -> Result<String> {
-        Ok(self
-            .store
-            .get(&their_ephemeral_public)
-            .ok_or(crate::error::SignalProtocolError::InvalidArgument(
-                "get their_ephemeral_public err of func load_ratchet_key".to_string(),
-            ))?
-            .first()
-            .ok_or(SignalProtocolError::InvalidArgument(
-                "get first their_ephemeral_public err of func load_ratchet_key".to_string(),
-            ))?
-            .to_string())
-    }
-
-    async fn store_ratchet_key(
-        &mut self,
-        _address: &ProtocolAddress,
-        _room_id: u32,
-        their_ephemeral_public: String,
-        our_ephemeral_private: String,
-    ) -> Result<()> {
-        if self.store.is_empty() || self.store.get(&their_ephemeral_public).is_none() {
-            self.store
-                .insert(their_ephemeral_public, vec![our_ephemeral_private]);
-            Ok(())
-        } else {
-            let mut list: Vec<String> = self
-                .store
-                .get(&their_ephemeral_public)
-                .ok_or(SignalProtocolError::InvalidArgument(
-                    "get their_ephemeral_public err of func store_ratchet_key".to_string(),
-                ))?
-                .to_vec();
-            list.push(our_ephemeral_private);
-            self.store.insert(their_ephemeral_public, list);
-            Ok(())
-        }
-    }
-
-    async fn delete_old_ratchet_key(
-        &self,
-        _id: u32,
-        _address: String,
-        _room_id: u32,
-    ) -> Result<()> {
-        self.store.to_owned().clear();
-        Ok(())
-    }
-
-    async fn get_max_id(&self, _address: &ProtocolAddress, _room_id: u32) -> Result<Option<u32>> {
-        Ok(Some(0))
-    }
-
-    async fn contains_ratchet_key(&self, their_ephemeral_public: String) -> Result<Option<bool>> {
-        let is_contain = self.store.contains_key(&their_ephemeral_public);
-        Ok(Some(is_contain))
-    }
-
-    async fn remove_ratchet_key(&self, their_ephemeral_public: String) -> Result<()> {
-        self.store.to_owned().remove(&their_ephemeral_public);
-        Ok(())
-    }
-}
-
 /// Reference implementation of [traits::SenderKeyStore].
 #[derive(Clone)]
 pub struct InMemSenderKeyStore {
@@ -455,7 +388,6 @@ pub struct InMemSignalProtocolStore {
     pub kyber_pre_key_store: InMemKyberPreKeyStore,
     pub identity_store: InMemIdentityKeyStore,
     pub sender_key_store: InMemSenderKeyStore,
-    pub ratchet_key_store: InMemRatchetKeyStore,
 }
 
 impl InMemSignalProtocolStore {
@@ -469,7 +401,6 @@ impl InMemSignalProtocolStore {
             kyber_pre_key_store: InMemKyberPreKeyStore::new(),
             identity_store: InMemIdentityKeyStore::new(key_pair, registration_id),
             sender_key_store: InMemSenderKeyStore::new(),
-            ratchet_key_store: InMemRatchetKeyStore::new(),
         })
     }
 
@@ -503,7 +434,7 @@ impl traits::IdentityKeyStore for InMemSignalProtocolStore {
         &mut self,
         address: &ProtocolAddress,
         identity: &IdentityKey,
-    ) -> Result<bool> {
+    ) -> Result<IdentityChange> {
         self.identity_store.save_identity(address, identity).await
     }
 
@@ -573,54 +504,14 @@ impl traits::KyberPreKeyStore for InMemSignalProtocolStore {
             .await
     }
 
-    async fn mark_kyber_pre_key_used(&mut self, kyber_prekey_id: KyberPreKeyId) -> Result<()> {
-        self.kyber_pre_key_store
-            .mark_kyber_pre_key_used(kyber_prekey_id)
-            .await
-    }
-}
-
-#[async_trait(?Send)]
-impl traits::RatchetKeyStore for InMemSignalProtocolStore {
-    async fn load_ratchet_key(&self, their_ephemeral_public: String) -> Result<String> {
-        self.ratchet_key_store
-            .load_ratchet_key(their_ephemeral_public).await
-    }
-
-    async fn store_ratchet_key(
+    async fn mark_kyber_pre_key_used(
         &mut self,
-        address: &ProtocolAddress,
-        room_id: u32,
-        their_ephemeral_public: String,
-        our_ephemeral_private: String,
+        kyber_prekey_id: KyberPreKeyId,
+        ec_prekey_id: SignedPreKeyId,
+        base_key: &PublicKey,
     ) -> Result<()> {
-        self.ratchet_key_store.store_ratchet_key(
-            address,
-            room_id,
-            their_ephemeral_public,
-            our_ephemeral_private,
-        ).await
-    }
-
-    async fn delete_old_ratchet_key(&self, id: u32, address: String, room_id: u32) -> Result<()> {
-        self.ratchet_key_store
-            .delete_old_ratchet_key(id, address, room_id)
-            .await
-    }
-
-    async fn get_max_id(&self, address: &ProtocolAddress, room_id: u32) -> Result<Option<u32>> {
-        self.ratchet_key_store.get_max_id(address, room_id).await
-    }
-
-    async fn contains_ratchet_key(&self, their_ephemeral_public: String) -> Result<Option<bool>> {
-        self.ratchet_key_store
-            .contains_ratchet_key(their_ephemeral_public)
-            .await
-    }
-
-    async fn remove_ratchet_key(&self, their_ephemeral_public: String) -> Result<()> {
-        self.ratchet_key_store
-            .remove_ratchet_key(their_ephemeral_public)
+        self.kyber_pre_key_store
+            .mark_kyber_pre_key_used(kyber_prekey_id, ec_prekey_id, base_key)
             .await
     }
 }

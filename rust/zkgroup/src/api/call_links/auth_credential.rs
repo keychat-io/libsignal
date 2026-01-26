@@ -12,20 +12,20 @@
 use partial_default::PartialDefault;
 use serde::{Deserialize, Serialize};
 
+use super::{CallLinkPublicParams, CallLinkSecretParams};
+use crate::ZkGroupVerificationFailure;
+use crate::common::serialization::ReservedByte;
 use crate::common::simple_types::*;
 use crate::crypto::uid_encryption;
 use crate::crypto::uid_struct::UidStruct;
 use crate::generic_server_params::{GenericServerPublicParams, GenericServerSecretParams};
 use crate::groups::UuidCiphertext;
-use crate::{ZkGroupVerificationFailure, SECONDS_PER_DAY};
-
-use super::{CallLinkPublicParams, CallLinkSecretParams};
 
 const CREDENTIAL_LABEL: &[u8] = b"20230421_Signal_CallLinkAuthCredential";
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct CallLinkAuthCredentialResponse {
-    reserved: ReservedBytes,
+    reserved: ReservedByte,
     proof: zkcredential::issuance::IssuanceProof,
     // Does not include the user ID because the client already knows that.
     // Does not include the redemption time because that is passed externally.
@@ -43,7 +43,7 @@ impl CallLinkAuthCredentialResponse {
             .add_public_attribute(&redemption_time)
             .issue(&params.credential_key, randomness);
         Self {
-            reserved: [0],
+            reserved: Default::default(),
             proof,
         }
     }
@@ -54,7 +54,7 @@ impl CallLinkAuthCredentialResponse {
         redemption_time: Timestamp,
         params: &GenericServerPublicParams,
     ) -> Result<CallLinkAuthCredential, ZkGroupVerificationFailure> {
-        if redemption_time % SECONDS_PER_DAY != 0 {
+        if !redemption_time.is_day_aligned() {
             return Err(ZkGroupVerificationFailure);
         }
 
@@ -64,15 +64,15 @@ impl CallLinkAuthCredentialResponse {
             .verify(&params.credential_key, self.proof)
             .map_err(|_| ZkGroupVerificationFailure)?;
         Ok(CallLinkAuthCredential {
-            reserved: [0],
+            reserved: Default::default(),
             credential: raw_credential,
         })
     }
 }
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct CallLinkAuthCredential {
-    reserved: ReservedBytes,
+    reserved: ReservedByte,
     credential: zkcredential::credentials::Credential,
     // Does not include the user ID because the client already knows that.
     // Does not include the redemption time because that's used as a key to lookup up this credential.
@@ -92,7 +92,7 @@ impl CallLinkAuthCredential {
             .add_attribute(&uid_attr, &call_link_params.uid_enc_key_pair)
             .present(&server_params.credential_key, &self.credential, randomness);
         CallLinkAuthCredentialPresentation {
-            reserved: [0],
+            reserved: Default::default(),
             proof,
             ciphertext: call_link_params.uid_enc_key_pair.encrypt(&uid_attr),
             redemption_time,
@@ -100,25 +100,24 @@ impl CallLinkAuthCredential {
     }
 }
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct CallLinkAuthCredentialPresentation {
-    pub(crate) reserved: ReservedBytes,
+    reserved: ReservedByte,
     pub(crate) proof: zkcredential::presentation::PresentationProof,
-    pub(crate) ciphertext:
-        zkcredential::attributes::Ciphertext<uid_encryption::UidEncryptionDomain>,
+    pub(crate) ciphertext: uid_encryption::Ciphertext,
     pub(crate) redemption_time: Timestamp,
 }
 
 impl CallLinkAuthCredentialPresentation {
     pub fn verify(
         &self,
-        current_time_in_seconds: Timestamp,
+        current_time: Timestamp,
         server_params: &GenericServerSecretParams,
         call_link_params: &CallLinkPublicParams,
     ) -> Result<(), ZkGroupVerificationFailure> {
         crate::ServerSecretParams::check_auth_credential_redemption_time(
             self.redemption_time,
-            current_time_in_seconds,
+            current_time,
         )?;
 
         zkcredential::presentation::PresentationProofVerifier::new(CREDENTIAL_LABEL)
@@ -130,7 +129,7 @@ impl CallLinkAuthCredentialPresentation {
 
     pub fn get_user_id(&self) -> UuidCiphertext {
         UuidCiphertext {
-            reserved: [0],
+            reserved: Default::default(),
             ciphertext: self.ciphertext,
         }
     }

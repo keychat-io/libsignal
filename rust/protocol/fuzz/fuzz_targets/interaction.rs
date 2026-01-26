@@ -5,7 +5,6 @@
 
 #![no_main]
 
-
 use std::time::SystemTime;
 
 use futures_util::FutureExt;
@@ -50,7 +49,7 @@ impl Participant {
                 signed_pre_key_id,
                 &SignedPreKeyRecord::new(
                     signed_pre_key_id,
-                    /*timestamp*/ 42,
+                    libsignal_protocol::Timestamp::from_epoch_millis(42),
                     &their_signed_pre_key_pair,
                     &their_signed_pre_key_signature,
                 ),
@@ -76,13 +75,43 @@ impl Participant {
             None
         };
 
+        let their_kyber_pre_key_pair = kem::KeyPair::generate(kem::KeyType::Kyber1024, rng);
+        let their_kyber_pre_key_public = their_kyber_pre_key_pair.public_key.serialize();
+        let their_kyber_pre_key_signature = them
+            .store
+            .get_identity_key_pair()
+            .await
+            .unwrap()
+            .private_key()
+            .calculate_signature(&their_kyber_pre_key_public, rng)
+            .unwrap();
+
+        them.pre_key_count += 1;
+        let kyber_pre_key_id: KyberPreKeyId = them.pre_key_count.into();
+
+        them.store
+            .save_kyber_pre_key(
+                kyber_pre_key_id,
+                &KyberPreKeyRecord::new(
+                    kyber_pre_key_id,
+                    libsignal_protocol::Timestamp::from_epoch_millis(42),
+                    &their_kyber_pre_key_pair,
+                    &their_kyber_pre_key_signature,
+                ),
+            )
+            .await
+            .unwrap();
+
         let their_pre_key_bundle = PreKeyBundle::new(
             them.store.get_local_registration_id().await.unwrap(),
-            1.into(), // device id
+            DeviceId::new(1).unwrap(),
             pre_key_info,
             signed_pre_key_id,
             their_signed_pre_key_pair.public_key,
             their_signed_pre_key_signature.into_vec(),
+            kyber_pre_key_id,
+            their_kyber_pre_key_pair.public_key,
+            their_kyber_pre_key_signature.into_vec(),
             *them
                 .store
                 .get_identity_key_pair()
@@ -102,6 +131,19 @@ impl Participant {
         )
         .await
         .unwrap();
+
+        assert!(
+            self.store
+                .load_session(&them.address)
+                .await
+                .unwrap()
+                .expect("just created")
+                .has_usable_sender_chain(
+                    SystemTime::UNIX_EPOCH,
+                    SessionUsabilityRequirements::all()
+                )
+                .unwrap()
+        );
     }
 
     async fn send_message(&mut self, them: &mut Self, rng: &mut (impl Rng + CryptoRng)) {
@@ -111,13 +153,20 @@ impl Participant {
             .load_session(&them.address)
             .await
             .unwrap()
-            .and_then(|session| session.has_usable_sender_chain(SystemTime::UNIX_EPOCH).ok())
+            .and_then(|session| {
+                session
+                    .has_usable_sender_chain(
+                        SystemTime::UNIX_EPOCH,
+                        SessionUsabilityRequirements::all(),
+                    )
+                    .ok()
+            })
             .unwrap_or(false)
         {
-            self.process_pre_key(them, rng.gen_bool(0.75), rng).await;
+            self.process_pre_key(them, rng.random_bool(0.75), rng).await;
         }
 
-        let length = rng.gen_range(0..140);
+        let length = rng.random_range(0..140);
         let mut buffer = vec![0; length];
         rng.fill_bytes(&mut buffer);
 
@@ -127,6 +176,7 @@ impl Participant {
             &mut self.store.session_store,
             &mut self.store.identity_store,
             SystemTime::UNIX_EPOCH,
+            rng,
         )
         .await
         .unwrap();
@@ -191,10 +241,10 @@ fuzz_target!(|data: (u64, &[u8])| {
 
         let mut alice = Participant {
             name: "alice",
-            address: ProtocolAddress::new("+14151111111".to_owned(), 1.into()),
+            address: ProtocolAddress::new("+14151111111".to_owned(), DeviceId::new(1).unwrap()),
             store: InMemSignalProtocolStore::new(
                 IdentityKeyPair::generate(&mut csprng),
-                csprng.gen(),
+                csprng.random(),
             )
             .unwrap(),
             message_queue: Vec::new(),
@@ -203,10 +253,10 @@ fuzz_target!(|data: (u64, &[u8])| {
         };
         let mut bob = Participant {
             name: "bob",
-            address: ProtocolAddress::new("+14151111112".to_owned(), 1.into()),
+            address: ProtocolAddress::new("+14151111112".to_owned(), DeviceId::new(1).unwrap()),
             store: InMemSignalProtocolStore::new(
                 IdentityKeyPair::generate(&mut csprng),
-                csprng.gen(),
+                csprng.random(),
             )
             .unwrap(),
             message_queue: Vec::new(),
@@ -235,7 +285,10 @@ fuzz_target!(|data: (u64, &[u8])| {
                         // We're not testing that.
                         me.archive_session(&them.address).await
                     } else {
-                        info!("{}: archiving LIMITED at {}/{}", me.name, me.archive_count, them.archive_count);
+                        info!(
+                            "{}: archiving LIMITED at {}/{}",
+                            me.name, me.archive_count, them.archive_count
+                        );
                     }
                 }
                 1..=32 => me.receive_messages(&them.address, &mut csprng).await,
@@ -247,10 +300,17 @@ fuzz_target!(|data: (u64, &[u8])| {
                     info!("{}: shuffle incoming messages", me.name);
                     me.message_queue.shuffle(&mut csprng);
                 }
-                _ => {
-                    if them.message_queue.len() < 1_500 {
-                        // Only send if it can't result in a too-long chain.
-                        // We're not testing that.
+                i => {
+                    // Only send if it can't result in a too-long chain.
+                    // We're not testing that.
+                    let space_in_queue = 1_500usize.saturating_sub(them.message_queue.len());
+                    // Send several messages at once, to increase the likelihood of PQ ratchets.
+                    let messages_to_send = i
+                        .saturating_sub(64)
+                        .div_ceil(4)
+                        .max(1)
+                        .min(u8::try_from(space_in_queue).unwrap_or(u8::MAX));
+                    for _ in 0..messages_to_send {
                         me.send_message(them, &mut csprng).await
                     }
                 }

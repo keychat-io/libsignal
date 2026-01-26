@@ -3,17 +3,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+#[allow(unused_imports)]
+use ::usernames::{
+    NicknameLimits, Username, UsernameError, UsernameLinkError, create_for_username,
+    decrypt_username,
+};
 use libsignal_bridge_macros::*;
+use rand::TryRngCore as _;
 
 #[allow(unused_imports)]
 use crate::support::*;
 use crate::*;
-
-#[allow(unused_imports)]
-use ::usernames::{
-    create_for_username, decrypt_username, NicknameLimits, Username, UsernameError,
-    UsernameLinkError,
-};
 
 #[bridge_fn]
 pub fn Username_Hash(username: String) -> Result<[u8; 32], UsernameError> {
@@ -21,11 +21,11 @@ pub fn Username_Hash(username: String) -> Result<[u8; 32], UsernameError> {
 }
 
 #[bridge_fn]
-pub fn Username_Proof(username: String, randomness: &[u8]) -> Result<Vec<u8>, UsernameError> {
+pub fn Username_Proof(username: String, randomness: &[u8; 32]) -> Result<Vec<u8>, UsernameError> {
     Username::new(&username)?.proof(randomness)
 }
 
-#[bridge_fn_void]
+#[bridge_fn]
 pub fn Username_Verify(
     proof: &[u8],
     hash: &[u8],
@@ -44,7 +44,7 @@ pub fn Username_CandidatesFrom(
     min_len: u32,
     max_len: u32,
 ) -> Result<Box<[String]>, UsernameError> {
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rngs::OsRng.unwrap_err();
     let limits = NicknameLimits::new(min_len as usize, max_len as usize);
     Username::candidates_from(&mut rng, &nickname, limits).map(Vec::into_boxed_slice)
 }
@@ -65,7 +65,7 @@ pub fn UsernameLink_Create(
     username: String,
     entropy: Option<&[u8]>,
 ) -> Result<Vec<u8>, UsernameLinkError> {
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rngs::OsRng.unwrap_err();
     let entropy = entropy
         .map(|buf| {
             buf.try_into()
@@ -82,7 +82,7 @@ pub fn UsernameLink_CreateAllowingEmptyEntropy(
     username: String,
     entropy: &[u8],
 ) -> Result<Vec<u8>, UsernameLinkError> {
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rngs::OsRng.unwrap_err();
     let entropy = if entropy.is_empty() {
         None
     } else {

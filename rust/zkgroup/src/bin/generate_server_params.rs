@@ -3,12 +3,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use base64::prelude::{Engine, BASE64_STANDARD};
-
 use std::io::Read;
 
+use base64::prelude::{BASE64_STANDARD, Engine};
 use rand::Rng;
-use zkgroup::{ServerSecretParams, RANDOMNESS_LEN};
+use zkgroup::{RANDOMNESS_LEN, ServerSecretParams};
 
 fn main() {
     let mut old_secret_base64 = String::new();
@@ -19,7 +18,7 @@ fn main() {
         .decode(old_secret_base64.trim_end())
         .unwrap();
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut randomness = [0u8; RANDOMNESS_LEN];
     rng.fill(&mut randomness);
 
@@ -31,6 +30,9 @@ fn main() {
     let new_public = new_secret.get_public_params();
     let serialized_public = bincode::serialize(&new_public).unwrap();
 
+    let new_secret_endorsements = new_secret.get_endorsement_root_key_pair();
+    let serialized_secret_endorsements = bincode::serialize(&new_secret_endorsements).unwrap();
+
     println!(
         "server_secret: {}",
         BASE64_STANDARD.encode(&serialized_secret[..])
@@ -38,5 +40,9 @@ fn main() {
     println!(
         "server_public: {}",
         BASE64_STANDARD.encode(&serialized_public[..])
+    );
+    println!(
+        "endorsements_secret: {}",
+        BASE64_STANDARD.encode(&serialized_secret_endorsements[..])
     );
 }

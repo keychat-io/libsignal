@@ -1,13 +1,16 @@
 [package]
 name = "device-transfer"
 version = "0.1.0"
-authors = ["Signal Messenger LLC"]
-edition = "2021"
-license = "AGPL-3.0-only"
+authors.workspace = true
+license.workspace = true
+edition = "2024"
+
+[lints]
+workspace = true
 
 [dependencies]
-boring = { version = "3.1.0", default-features = false }
-libc = "0.2"
+boring = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
-hex = "0.4"
+hex = { workspace = true }

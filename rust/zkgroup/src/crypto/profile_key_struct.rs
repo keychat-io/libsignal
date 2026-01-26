@@ -5,14 +5,14 @@
 
 #![allow(non_snake_case)]
 
+use curve25519_dalek_signal::ristretto::RistrettoPoint;
+use partial_default::PartialDefault;
+use serde::{Deserialize, Serialize};
+use subtle::{Choice, ConditionallySelectable};
+
 use crate::common::constants::*;
 use crate::common::sho::*;
 use crate::common::simple_types::*;
-use curve25519_dalek::ristretto::RistrettoPoint;
-use partial_default::PartialDefault;
-use serde::{Deserialize, Serialize};
-
-use subtle::{Choice, ConditionallySelectable};
 
 #[derive(Copy, Clone, PartialEq, Eq, Serialize, Deserialize, PartialDefault)]
 pub struct ProfileKeyStruct {
@@ -26,7 +26,7 @@ impl ProfileKeyStruct {
         let mut encoded_profile_key = profile_key_bytes;
         encoded_profile_key[0] &= 254;
         encoded_profile_key[31] &= 63;
-        let M3 = Self::calc_M3(profile_key_bytes, uid_bytes);
+        let M3 = Self::calc_M3(Self::seed_M3(), profile_key_bytes, uid_bytes);
         let M4 = RistrettoPoint::from_uniform_bytes_single_elligator(&encoded_profile_key);
 
         ProfileKeyStruct {
@@ -36,15 +36,20 @@ impl ProfileKeyStruct {
         }
     }
 
-    pub fn calc_M3(profile_key_bytes: ProfileKeyBytes, uid_bytes: UidBytes) -> RistrettoPoint {
+    pub(crate) fn seed_M3() -> Sho {
+        Sho::new_seed(b"Signal_ZKGroup_20200424_ProfileKeyAndUid_ProfileKey_CalcM3")
+    }
+
+    pub(crate) fn calc_M3(
+        mut seed: Sho,
+        profile_key_bytes: ProfileKeyBytes,
+        uid_bytes: UidBytes,
+    ) -> RistrettoPoint {
         let mut combined_array = [0u8; PROFILE_KEY_LEN + UUID_LEN];
         combined_array[..PROFILE_KEY_LEN].copy_from_slice(&profile_key_bytes);
         combined_array[PROFILE_KEY_LEN..].copy_from_slice(&uid_bytes);
-        Sho::new(
-            b"Signal_ZKGroup_20200424_ProfileKeyAndUid_ProfileKey_CalcM3",
-            &combined_array,
-        )
-        .get_point_single_elligator()
+        seed.absorb_and_ratchet(&combined_array);
+        seed.get_point_single_elligator()
     }
 
     pub fn to_bytes(&self) -> ProfileKeyBytes {
@@ -53,7 +58,10 @@ impl ProfileKeyStruct {
 }
 
 impl ConditionallySelectable for ProfileKeyStruct {
-    #[allow(clippy::needless_range_loop)]
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "an explicit loop makes it more clear that this runs in constant time"
+    )]
     fn conditional_select(
         a: &ProfileKeyStruct,
         b: &ProfileKeyStruct,
