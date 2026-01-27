@@ -6,8 +6,7 @@
 //! SGX report body, ported from Open Enclave headers in v0.17.7.
 
 use bitflags::bitflags;
-
-use std::intrinsics::transmute;
+use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 use crate::endian::*;
 
@@ -20,7 +19,7 @@ const SGX_HASH_SIZE: usize = 32;
 
 pub type MREnclave = [u8; SGX_HASH_SIZE];
 
-#[derive(Debug)]
+#[derive(Debug, FromBytes, IntoBytes, Immutable)]
 #[repr(C)]
 // sgx_report_body_t
 pub(crate) struct SgxReportBody {
@@ -112,15 +111,10 @@ bitflags! {
 impl SgxReportBody {
     pub fn has_flag(&self, flag: SgxFlags) -> bool {
         // first 8 bytes are little endian SGX flags
-        let bytes: [u8; 8] = self.sgx_attributes[0..8].try_into().unwrap();
+        let bytes: [u8; 8] = *self
+            .sgx_attributes
+            .first_chunk()
+            .expect("more than 8 bytes long");
         SgxFlags::from_bits_truncate(u64::from_le_bytes(bytes)).contains(flag)
-    }
-}
-
-impl TryFrom<[u8; std::mem::size_of::<SgxReportBody>()]> for SgxReportBody {
-    type Error = super::Error;
-
-    fn try_from(src: [u8; std::mem::size_of::<SgxReportBody>()]) -> super::Result<Self> {
-        unsafe { Ok(transmute(src)) }
     }
 }

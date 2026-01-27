@@ -3,26 +3,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use std::io::Read as _;
-
-use clap::{Args, Parser};
-use futures::io::AllowStdIo;
+use clap::Parser;
 use futures::AsyncRead;
-
-use libsignal_message_backup::args::{parse_aci, parse_hex_bytes};
 use libsignal_message_backup::backup::Purpose;
 use libsignal_message_backup::frame::{
-    CursorFactory, FileReaderFactory, FramesReader, ReaderFactory, UnvalidatedHmacReader,
-    VerifyHmac,
+    FramesReader, ReaderFactory as _, UnvalidatedHmacReader, VerifyHmac,
 };
-use libsignal_message_backup::key::{BackupKey, MessageBackupKey};
 use libsignal_message_backup::{BackupReader, Error, FoundUnknownField, ReadResult};
-use libsignal_protocol::Aci;
-use mediasan_common::SeekSkipAdapter;
 
 use crate::args::ParseVerbosity;
 
 mod args;
+
+#[path = "../support/mod.rs"]
+mod support;
+use support::{AsyncReaderFactory, FilenameOrContents, KeyArgs};
 
 /// Validates, and optionally prints the contents of, message backup files.
 ///
@@ -48,38 +43,8 @@ struct Cli {
     #[arg(long, default_value_t=Purpose::RemoteBackup)]
     purpose: Purpose,
 
-    // TODO once https://github.com/clap-rs/clap/issues/5092 is resolved, make
-    // `derive_key` and `key_parts` Optional at the top level.
     #[command(flatten)]
-    derive_key: DeriveKey,
-
-    #[command(flatten)]
-    key_parts: KeyParts,
-}
-
-#[derive(Debug, Args, PartialEq)]
-#[group(conflicts_with = "KeyParts")]
-struct DeriveKey {
-    /// account master key, used with the ACI to derive the message backup key
-    #[arg(long, value_parser=parse_hex_bytes::<32>, requires="aci")]
-    master_key: Option<[u8; BackupKey::MASTER_KEY_LEN]>,
-    /// ACI for the backup creator
-    #[arg(long, value_parser=parse_aci, requires="master_key")]
-    aci: Option<Aci>,
-}
-
-#[derive(Debug, Args, PartialEq)]
-#[group(conflicts_with = "DeriveKey")]
-struct KeyParts {
-    /// HMAC key, used if the master key is not provided
-    #[arg(long, value_parser=parse_hex_bytes::<32>, requires_all=["aes_key", "iv"])]
-    hmac_key: Option<[u8; MessageBackupKey::HMAC_KEY_LEN]>,
-    /// AES encryption key, used if the master key is not provided
-    #[arg(long, value_parser=parse_hex_bytes::<32>, requires_all=["hmac_key", "iv"])]
-    aes_key: Option<[u8; MessageBackupKey::AES_KEY_LEN]>,
-    /// AES IV bytes, used if the master key is not provided
-    #[arg(long, value_parser=parse_hex_bytes::<16>, requires_all=["hmac_key", "aes_key"])]
-    iv: Option<[u8; MessageBackupKey::IV_LEN]>,
+    key_args: KeyArgs,
 }
 
 fn main() {
@@ -89,48 +54,18 @@ fn main() {
 async fn async_main() {
     let Cli {
         file: file_or_stdin,
-
-        derive_key,
-
-        key_parts,
-
+        key_args,
         purpose,
         print,
         verbose,
     } = Cli::parse();
+    env_logger::init();
+
     let print = PrintOutput(print);
 
     let verbosity = verbose.into();
 
-    let derive_key = {
-        let DeriveKey { master_key, aci } = derive_key;
-        master_key.zip(aci)
-    };
-    let key_parts = {
-        let KeyParts {
-            hmac_key,
-            aes_key,
-            iv,
-        } = key_parts;
-        hmac_key.zip(aes_key).zip(iv)
-    };
-
-    let key = {
-        match (derive_key, key_parts) {
-            (None, None) => None,
-            (None, Some(((hmac_key, aes_key), iv))) => Some(MessageBackupKey {
-                aes_key,
-                hmac_key,
-                iv,
-            }),
-            (Some((master_key, aci)), None) => Some({
-                let backup_key = BackupKey::derive_from_master_key(&master_key);
-                let backup_id = backup_key.derive_backup_id(&aci);
-                MessageBackupKey::derive(&backup_key, &backup_id)
-            }),
-            (Some(_), Some(_)) => unreachable!("disallowed by clap arg parser"),
-        }
-    };
+    let key = key_args.into_key();
 
     let contents = FilenameOrContents::from(file_or_stdin);
     let mut factory = AsyncReaderFactory::from(&contents);
@@ -154,66 +89,6 @@ async fn async_main() {
         .unwrap_or_else(|e| panic!("backup error: {e:#}"));
 }
 
-/// Filename or in-memory buffer of contents.
-enum FilenameOrContents {
-    Filename(String),
-    Contents(Box<[u8]>),
-}
-
-impl From<clap_stdin::FileOrStdin> for FilenameOrContents {
-    fn from(arg: clap_stdin::FileOrStdin) -> Self {
-        match arg.source {
-            clap_stdin::Source::Stdin => {
-                let mut buffer = vec![];
-                std::io::stdin()
-                    .lock()
-                    .read_to_end(&mut buffer)
-                    .expect("failed to read from stdin");
-                Self::Contents(buffer.into_boxed_slice())
-            }
-            clap_stdin::Source::Arg(path) => Self::Filename(path),
-        }
-    }
-}
-
-/// [`ReaderFactory`] impl backed by a [`FilenameOrContents`].
-enum AsyncReaderFactory<'a> {
-    // Using `AllowStdIo` with a `File` isn't generally a good idea since
-    // the `Read` implementation will block. Since we're using a
-    // single-threaded executor, though, the blocking I/O isn't a problem.
-    // If that changes, this should be changed to an async-aware type, like
-    // something from the `tokio` or `async-std` crates.
-    File(FileReaderFactory<&'a str>),
-    Cursor(CursorFactory<&'a [u8]>),
-}
-
-impl<'a> From<&'a FilenameOrContents> for AsyncReaderFactory<'a> {
-    fn from(value: &'a FilenameOrContents) -> Self {
-        match value {
-            FilenameOrContents::Filename(path) => Self::File(FileReaderFactory { path }),
-            FilenameOrContents::Contents(contents) => Self::Cursor(CursorFactory::new(contents)),
-        }
-    }
-}
-
-impl<'a> ReaderFactory for AsyncReaderFactory<'a> {
-    type Reader = SeekSkipAdapter<
-        futures::future::Either<
-            AllowStdIo<std::fs::File>,
-            <CursorFactory<&'a [u8]> as ReaderFactory>::Reader,
-        >,
-    >;
-
-    fn make_reader(&mut self) -> futures::io::Result<Self::Reader> {
-        match self {
-            AsyncReaderFactory::File(f) => f
-                .make_reader()
-                .map(|SeekSkipAdapter(f)| futures::future::Either::Left(f)),
-            AsyncReaderFactory::Cursor(c) => c.make_reader().map(futures::future::Either::Right),
-        }
-        .map(SeekSkipAdapter)
-    }
-}
 /// Wrapper over encrypted- or plaintext-sourced [`BackupReader`].
 enum MaybeEncryptedBackupReader<R: AsyncRead + Unpin> {
     EncryptedCompressed(Box<BackupReader<FramesReader<R>>>),
@@ -267,7 +142,8 @@ fn print_unknown_fields(found_unknown_fields: Vec<FoundUnknownField>) {
 #[cfg(test)]
 mod test {
     use assert_matches::assert_matches;
-    use clap_stdin::FileOrStdin;
+    use libsignal_core::Aci;
+    use support::{DeriveKey, KeyParts};
     use test_case::test_case;
 
     use super::*;
@@ -286,19 +162,17 @@ mod test {
     fn cli_parse_no_keys_plaintext_binproto() {
         const INPUT: &[&str] = &[EXECUTABLE_NAME, "filename"];
 
-        let file_source = assert_matches!(Cli::try_parse_from(INPUT), Ok(Cli {
-            file:
-                FileOrStdin {
-                    source: clap_stdin::Source::Arg(file_source),
-                    ..
-                },
+        let file = assert_matches!(Cli::try_parse_from(INPUT), Ok(Cli {
+            file,
             verbose: 0,
             print: false,
             purpose: Purpose::RemoteBackup,
-            derive_key: DeriveKey { master_key: None, aci: None},
-            key_parts: KeyParts { hmac_key: None, aes_key: None, iv: None },
-        }) =>  file_source);
-        assert_eq!(file_source, "filename");
+            key_args: KeyArgs {
+                derive_key: DeriveKey { account_entropy: None, aci: None, forward_secrecy_token: None },
+                key_parts: KeyParts { hmac_key: None, aes_key: None }
+            },
+        }) => file);
+        assert_eq!(file.filename(), "filename");
     }
 
     #[test]
@@ -306,30 +180,31 @@ mod test {
         const INPUT: &[&str] = &[
             EXECUTABLE_NAME,
             "filename",
-            "--master-key",
+            "--account-entropy",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "--aci",
             "55555555-5555-5555-5555-555555555555",
+            "--forward-secrecy-token",
+            "abababababababababababababababababababababababababababababababab",
         ];
 
-        let (file_source, derive_key) = assert_matches!(Cli::try_parse_from(INPUT), Ok(Cli {
-            file:
-                FileOrStdin {
-                    source: clap_stdin::Source::Arg(file_source),
-                    ..
-                },
+        let (file, derive_key) = assert_matches!(Cli::try_parse_from(INPUT), Ok(Cli {
+            file,
             verbose: 0,
             print: false,
             purpose: Purpose::RemoteBackup,
-            derive_key,
-            key_parts: KeyParts { hmac_key: None, aes_key: None, iv: None },
-        }) => (file_source, derive_key));
-        assert_eq!(file_source, "filename");
+            key_args: KeyArgs {
+                derive_key,
+                key_parts: KeyParts { hmac_key: None, aes_key: None }
+            },
+        }) => (file, derive_key));
+        assert_eq!(file.filename(), "filename");
         assert_eq!(
             derive_key,
             DeriveKey {
-                master_key: Some([0xaa; 32]),
-                aci: Some(Aci::from_uuid_bytes([0x55; 16]))
+                account_entropy: Some(std::str::from_utf8(&[b'a'; 64]).expect("ascii").to_owned()),
+                aci: Some(Aci::from_uuid_bytes([0x55; 16])),
+                forward_secrecy_token: Some([0xab; 32]),
             }
         );
     }
@@ -343,39 +218,34 @@ mod test {
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "--aes-key",
             "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-            "--iv",
-            "dddddddddddddddddddddddddddddddd",
         ];
 
-        let (file_source, key_parts) = assert_matches!(Cli::try_parse_from(INPUT), Ok(Cli {
-            file:
-                FileOrStdin {
-                    source: clap_stdin::Source::Arg(file_source),
-                    ..
-                },
+        let (file, key_parts) = assert_matches!(Cli::try_parse_from(INPUT), Ok(Cli {
+            file,
             verbose: 0,
             print: false,
             purpose: Purpose::RemoteBackup,
-            derive_key: DeriveKey { master_key: None, aci: None},
-            key_parts,
-        }) => (file_source, key_parts));
-        assert_eq!(file_source, "filename");
+            key_args: KeyArgs {
+                derive_key: DeriveKey { account_entropy: None, aci: None, forward_secrecy_token: None },
+                key_parts,
+            }
+        }) => (file, key_parts));
+        assert_eq!(file.filename(), "filename");
         assert_eq!(
             key_parts,
             KeyParts {
                 aes_key: Some([0xcc; 32]),
                 hmac_key: Some([0xbb; 32]),
-                iv: Some([0xdd; 16]),
             }
         );
     }
 
     #[test]
-    fn cli_parse_master_key_requires_aci() {
+    fn cli_parse_account_entropy_requires_aci() {
         const INPUT: &[&str] = &[
             EXECUTABLE_NAME,
             "filename",
-            "--master-key",
+            "--account-entropy",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ];
         let e = assert_matches!(Cli::try_parse_from(INPUT), Err(e) => e);
@@ -391,13 +261,11 @@ mod test {
             "filename",
             "--hmac-key",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "--aes-key",
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         ];
         let e = assert_matches!(Cli::try_parse_from(INPUT), Err(e) => e);
         assert_eq!(e.kind(), clap::error::ErrorKind::MissingRequiredArgument);
 
-        assert!(e.to_string().contains("--iv <IV>"), "{e}");
+        assert!(e.to_string().contains("--aes-key <AES_KEY>"), "{e}");
     }
 
     #[test]
@@ -405,12 +273,12 @@ mod test {
         const INPUT_PREFIX: &[&str] = &[
             EXECUTABLE_NAME,
             "filename",
-            "--master-key",
+            "--account-entropy",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "--aci",
             "55555555-5555-5555-5555-555555555555",
         ];
-        const CONFLICTING_FLAGS: [&[&str]; 3] = [
+        const CONFLICTING_FLAGS: &[&[&str]] = &[
             &[
                 "--hmac-key",
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -419,12 +287,11 @@ mod test {
                 "--aes-key",
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             ],
-            &["--iv", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
         ];
         for case in CONFLICTING_FLAGS {
             println!("case: {case:?}");
             let e =
-                assert_matches!(Cli::try_parse_from(INPUT_PREFIX.iter().chain(case)), Err(e) => e);
+                assert_matches!(Cli::try_parse_from(INPUT_PREFIX.iter().chain(*case)), Err(e) => e);
             assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
 
             assert!(e.to_string().contains("--aci <ACI>"), "{e}");
@@ -437,6 +304,9 @@ mod test {
     #[test_case("transfer", Purpose::DeviceTransfer; "transfer")]
     #[test_case("device-transfer", Purpose::DeviceTransfer; "transfer hyphen")]
     #[test_case("device_transfer", Purpose::DeviceTransfer; "transfer underscore")]
+    #[test_case("takeout", Purpose::TakeoutExport; "takeout")]
+    #[test_case("takeout-export", Purpose::TakeoutExport; "takeout hyphen")]
+    #[test_case("takeout_export", Purpose::TakeoutExport; "takeout underscore")]
     fn cli_parse_purpose(purpose_flag: &str, expected_purpose: Purpose) {
         let input = [EXECUTABLE_NAME, "filename", "--purpose", purpose_flag];
         let cli = Cli::try_parse_from(input).expect("parse failed");

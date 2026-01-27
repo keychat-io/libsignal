@@ -5,6 +5,9 @@
 
 package org.signal.libsignal.internal;
 
+import java.util.function.LongConsumer;
+import java.util.function.LongFunction;
+
 /**
  * Provides access to a Rust object handle while keeping the Java wrapper alive.
  *
@@ -21,8 +24,97 @@ public class NativeHandleGuard implements AutoCloseable {
   /**
    * @see NativeHandleGuard
    */
-  public static interface Owner {
+  public interface Owner {
     long unsafeNativeHandleWithoutGuard();
+
+    default NativeHandleGuard guard() {
+      return new NativeHandleGuard(this);
+    }
+
+    default <T> T guardedMap(final LongFunction<T> function) {
+      try (final NativeHandleGuard guard = new NativeHandleGuard(this)) {
+        return function.apply(guard.nativeHandle());
+      }
+    }
+
+    default <T> T guardedMapChecked(final FilterExceptions.ThrowingLongFunction<T> function)
+        throws Exception {
+      try (final NativeHandleGuard guard = new NativeHandleGuard(this)) {
+        return function.apply(guard.nativeHandle());
+      }
+    }
+
+    default void guardedRun(final LongConsumer consumer) {
+      try (final NativeHandleGuard guard = new NativeHandleGuard(this)) {
+        consumer.accept(guard.nativeHandle());
+      }
+    }
+
+    default void guardedRunChecked(final FilterExceptions.ThrowingLongConsumer consumer)
+        throws Exception {
+      try (final NativeHandleGuard guard = new NativeHandleGuard(this)) {
+        consumer.accept(guard.nativeHandle());
+      }
+    }
+  }
+
+  public abstract static class SimpleOwner implements Owner {
+
+    private final long nativeHandle;
+
+    protected SimpleOwner(final long nativeHandle) {
+      this.nativeHandle = nativeHandle;
+    }
+
+    protected abstract void release(long nativeHandle);
+
+    protected static final long throwIfNull(long handle) {
+      if (handle == 0L) {
+        throw new NullPointerException();
+      }
+      return handle;
+    }
+
+    @Override
+    @CalledFromNative
+    public long unsafeNativeHandleWithoutGuard() {
+      return nativeHandle;
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    protected void finalize() {
+      release(this.nativeHandle);
+    }
+  }
+
+  // A note on synchronization.
+  //
+  // close is synchronized to eliminate the race between it and finalize.
+  //
+  // All in the name of calling release exactly once.
+  public abstract static class CloseableOwner extends SimpleOwner implements AutoCloseable {
+    private boolean isClosed = false;
+
+    protected CloseableOwner(long nativeHandle) {
+      super(nativeHandle);
+    }
+
+    @Override
+    public synchronized void close() {
+      if (isClosed) {
+        return;
+      }
+      this.isClosed = true;
+      this.release(this.unsafeNativeHandleWithoutGuard());
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
+    protected void finalize() {
+      close();
+      // Not calling super.finalize() is fine, because close already does the same thing.
+    }
   }
 
   private final Owner owner;

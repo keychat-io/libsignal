@@ -9,24 +9,19 @@
 #[cfg(not(any(feature = "ffi", feature = "jni", feature = "node")))]
 compile_error!("Feature \"ffi\", \"jni\", or \"node\" must be enabled for this crate.");
 
+pub use libsignal_bridge_types::support::IllegalArgumentError;
+pub use libsignal_bridge_types::{
+    bridge_as_handle, bridge_deserialize, bridge_fixed_length_serializable_fns, bridge_get,
+    bridge_handle_fns, bridge_serializable_handle_fns, describe_panic, io,
+};
 #[cfg(feature = "ffi")]
-#[macro_use]
-pub mod ffi;
-
+pub use libsignal_bridge_types::{ffi, ffi_arg_type, ffi_result_type};
 #[cfg(feature = "jni")]
-#[macro_use]
-pub mod jni;
-
+pub use libsignal_bridge_types::{jni, jni_arg_type, jni_args, jni_result_type, jni_signature};
 #[cfg(feature = "node")]
-#[macro_use]
-pub mod node;
-
-#[macro_use]
-mod support;
+pub use libsignal_bridge_types::{node, node_register};
 
 pub mod logging;
-
-pub use support::{describe_panic, AsyncRuntime, ResultReporter};
 
 pub mod crypto;
 pub mod protocol;
@@ -36,20 +31,16 @@ pub mod protocol;
 pub mod device_transfer;
 
 mod cds2;
-mod sgx_session;
-
 mod hsm_enclave;
+mod sgx_session;
 
 pub mod zkgroup;
 
-#[cfg(feature = "ffi")]
-pub mod ias;
-
 pub mod net;
 
+mod account_keys;
+
 // Desktop does not use SVR
-#[cfg(any(feature = "jni", feature = "ffi"))]
-mod pin;
 #[cfg(any(feature = "jni", feature = "ffi"))]
 mod svr2;
 
@@ -57,12 +48,7 @@ pub mod incremental_mac;
 pub mod message_backup;
 pub mod usernames;
 
-mod io;
-
 #[cfg(feature = "signal-media")]
 pub mod media;
 
-// These APIs are only useful for tests. To save on code size, we omit them by default.
-// To run tests, build with `--features testing-fns`.
-#[cfg(feature = "testing-fns")]
-mod testing;
+pub(crate) mod support;

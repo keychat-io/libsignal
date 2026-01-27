@@ -3,69 +3,60 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-#[cfg(any(feature = "jni", feature = "ffi"))]
-use futures_util::FutureExt as _;
+use futures_util::io::BufReader;
+use libsignal_account_keys::{AccountEntropyPool, BACKUP_FORWARD_SECRECY_TOKEN_LEN};
 use libsignal_bridge_macros::*;
+use libsignal_bridge_types::message_backup::*;
 use libsignal_message_backup::backup::Purpose;
-use libsignal_message_backup::frame::{
-    LimitedReaderFactory, ValidationError as FrameValidationError,
-};
-use libsignal_message_backup::key::{BackupKey, MessageBackupKey as MessageBackupKeyInner};
-use libsignal_message_backup::parse::ParseError;
-use libsignal_message_backup::{BackupReader, Error, FoundUnknownField, ReadResult};
+use libsignal_message_backup::frame::LimitedReaderFactory;
+use libsignal_message_backup::json::exporter::FrameExportResult as JsonFrameExportResult;
+use libsignal_message_backup::{BackupReader, FoundUnknownField, ReadError, ReadResult};
 use libsignal_protocol::Aci;
 
 use crate::io::{AsyncInput, InputStream};
 use crate::support::*;
 use crate::*;
 
-pub struct MessageBackupKey(#[allow(unused)] MessageBackupKeyInner);
-
-bridge_handle!(MessageBackupKey, clone = false);
+bridge_handle_fns!(MessageBackupKey, clone = false);
+bridge_handle_fns!(
+    MessageBackupValidationOutcome,
+    clone = false,
+    jni = false,
+    node = false
+);
 
 #[bridge_fn]
-fn MessageBackupKey_New(master_key: &[u8; 32], aci: Aci) -> MessageBackupKey {
-    let backup_key = BackupKey::derive_from_master_key(master_key);
-    let backup_id = backup_key.derive_backup_id(&aci);
-    MessageBackupKey(MessageBackupKeyInner::derive(&backup_key, &backup_id))
+fn MessageBackupKey_FromAccountEntropyPool(
+    account_entropy: AccountEntropyPool,
+    aci: Aci,
+    forward_secrecy_token: Option<&[u8; BACKUP_FORWARD_SECRECY_TOKEN_LEN]>,
+) -> MessageBackupKey {
+    MessageBackupKey::from_account_entropy_pool(&account_entropy, aci, forward_secrecy_token)
 }
 
-#[derive(Debug)]
-enum MessageBackupValidationError {
-    Io(std::io::Error),
-    String(String),
+#[bridge_fn]
+fn MessageBackupKey_FromBackupKeyAndBackupId(
+    backup_key: &[u8; 32],
+    backup_id: &[u8; 16],
+    forward_secrecy_token: Option<&[u8; BACKUP_FORWARD_SECRECY_TOKEN_LEN]>,
+) -> MessageBackupKey {
+    MessageBackupKey::from_backup_key_and_backup_id(backup_key, backup_id, forward_secrecy_token)
 }
 
-impl From<Error> for MessageBackupValidationError {
-    fn from(value: Error) -> Self {
-        match value {
-            Error::BackupValidation(e) => Self::String(e.to_string()),
-            Error::Parse(ParseError::Io(e)) => Self::Io(e),
-            e @ Error::NoFrames
-            | e @ Error::InvalidProtobuf(_)
-            | e @ Error::HmacMismatch(_)
-            | e @ Error::Parse(ParseError::Decode(_)) => Self::String(e.to_string()),
-        }
-    }
+#[bridge_fn(ffi = false, node = false)]
+fn MessageBackupKey_FromParts(hmac_key: &[u8; 32], aes_key: &[u8; 32]) -> MessageBackupKey {
+    MessageBackupKey::from_parts(*hmac_key, *aes_key)
 }
 
-impl From<FrameValidationError> for MessageBackupValidationError {
-    fn from(value: FrameValidationError) -> Self {
-        match value {
-            FrameValidationError::Io(e) => Self::Io(e),
-            e @ (FrameValidationError::TooShort | FrameValidationError::InvalidHmac(_)) => {
-                Self::String(e.to_string())
-            }
-        }
-    }
+#[bridge_fn]
+fn MessageBackupKey_GetHmacKey(key: &MessageBackupKey) -> [u8; 32] {
+    key.0.hmac_key
 }
 
-pub struct MessageBackupValidationOutcome {
-    pub(crate) error_message: Option<String>,
-    pub(crate) found_unknown_fields: Vec<FoundUnknownField>,
+#[bridge_fn]
+fn MessageBackupKey_GetAesKey(key: &MessageBackupKey) -> [u8; 32] {
+    key.0.aes_key
 }
-#[cfg(feature = "ffi")]
-ffi_bridge_handle!(MessageBackupValidationOutcome, clone = false);
 
 #[bridge_fn(jni = false, node = false)]
 fn MessageBackupValidationOutcome_getErrorMessage(
@@ -93,16 +84,15 @@ async fn MessageBackupValidator_Validate(
     len: u64,
     purpose: AsType<Purpose, u8>,
 ) -> Result<MessageBackupValidationOutcome, std::io::Error> {
-    let MessageBackupKey(key) = key;
-
     let streams = [
-        AsyncInput::new(first_stream, len),
-        AsyncInput::new(second_stream, len),
+        // The first stream is read in bulk, so buffering doesn't gain us anything.
+        BufReader::with_capacity(0, AsyncInput::new(first_stream, len)),
+        BufReader::new(AsyncInput::new(second_stream, len)),
     ];
     let factory = LimitedReaderFactory::new(streams);
 
     let (error, found_unknown_fields) =
-        match BackupReader::new_encrypted_compressed(key, factory, purpose.into_inner()).await {
+        match BackupReader::new_encrypted_compressed(&key.0, factory, purpose.into_inner()).await {
             Err(e) => (Some(e.into()), Vec::new()),
             Ok(reader) => {
                 let ReadResult {
@@ -125,4 +115,78 @@ async fn MessageBackupValidator_Validate(
         error_message,
         found_unknown_fields,
     })
+}
+
+bridge_handle_fns!(OnlineBackupValidator, clone = false);
+bridge_handle_fns!(BackupJsonExporter, clone = false, ffi = false, jni = false);
+
+#[bridge_fn]
+fn OnlineBackupValidator_New(
+    backup_info_frame: &[u8],
+    purpose: AsType<Purpose, u8>,
+) -> Result<OnlineBackupValidator, ReadError> {
+    OnlineBackupValidator::from_backup_info_frame(backup_info_frame, purpose.into_inner())
+        .map_err(ReadError::with_error_only)
+}
+
+#[bridge_fn]
+fn OnlineBackupValidator_AddFrame(
+    backup: &mut OnlineBackupValidator,
+    frame: &[u8],
+) -> Result<(), ReadError> {
+    let unknown_fields = backup
+        .get_mut()
+        .parse_and_add_frame(frame, |_| ())
+        .map_err(ReadError::with_error_only)?;
+
+    for entry in unknown_fields
+        .into_iter()
+        .map(FoundUnknownField::in_frame(0))
+    {
+        log::warn!("{entry}");
+    }
+
+    Ok(())
+}
+
+#[bridge_fn]
+fn OnlineBackupValidator_Finalize(backup: &mut OnlineBackupValidator) -> Result<(), ReadError> {
+    backup.finalize().map_err(ReadError::with_error_only)
+}
+
+#[bridge_fn(ffi = false, jni = false)]
+fn BackupJsonExporter_New(
+    backup_info: &[u8],
+    should_validate: bool,
+) -> Result<BackupJsonExporter, ReadError> {
+    let (exporter, initial_chunk) =
+        libsignal_message_backup::json::exporter::JsonExporter::new(backup_info, should_validate)
+            .map_err(ReadError::with_error_only)?;
+
+    Ok(BackupJsonExporter::new(exporter, initial_chunk))
+}
+
+#[bridge_fn(ffi = false, jni = false)]
+fn BackupJsonExporter_GetInitialChunk(exporter: &BackupJsonExporter) -> String {
+    exporter.initial_chunk().clone()
+}
+
+#[bridge_fn(ffi = false, jni = false)]
+fn BackupJsonExporter_ExportFrames(
+    exporter: &mut BackupJsonExporter,
+    frames: &[u8],
+) -> Result<Box<[JsonFrameExportResult]>, ReadError> {
+    exporter
+        .inner_mut()
+        .export_frames(frames)
+        .map(|results| results.into_boxed_slice())
+        .map_err(ReadError::with_error_only)
+}
+
+#[bridge_fn(ffi = false, jni = false)]
+fn BackupJsonExporter_Finish(exporter: &mut BackupJsonExporter) -> Result<(), ReadError> {
+    exporter
+        .inner_mut()
+        .finish()
+        .map_err(ReadError::with_error_only)
 }

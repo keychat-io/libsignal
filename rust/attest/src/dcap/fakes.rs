@@ -12,23 +12,24 @@
 //! 3. Manipulate the default evidence/endorsements
 //! 4. Create the final evidence/endorsements with [`FakeAttestation::sign`]
 
-use crate::dcap::cert_chain::testutil::TestCert;
-use crate::dcap::cert_chain::CertChain;
+use std::time::SystemTime;
+
+use boring_signal::asn1::{Asn1Integer, Asn1IntegerRef};
+use boring_signal::bn::{BigNum, BigNumContext};
+use boring_signal::ec::{EcGroup, EcKey, EcKeyRef};
+use boring_signal::ecdsa::EcdsaSig;
+use boring_signal::hash::{Hasher, MessageDigest};
+use boring_signal::nid::Nid;
+use boring_signal::pkey::{PKey, Private, Public};
+use chrono::Utc;
+
+use crate::cert_chain::CertChain;
+use crate::cert_chain::testutil::TestCert;
 use crate::dcap::ecdsa::EcdsaSigned;
 use crate::dcap::endorsements::SgxEndorsements;
 use crate::dcap::evidence::Evidence;
 use crate::dcap::revocation_list::RevocationList;
-use crate::dcap::{attest_impl, Attestation};
-use boring::asn1::{Asn1Integer, Asn1IntegerRef};
-use boring::bn::{BigNum, BigNumContext};
-use boring::ec::{EcGroup, EcKey, EcKeyRef};
-use boring::ecdsa::EcdsaSig;
-use boring::hash::{Hasher, MessageDigest};
-use boring::nid::Nid;
-use boring::pkey::{PKey, Private, Public};
-use chrono::Utc;
-
-use std::time::SystemTime;
+use crate::dcap::{Attestation, attest_impl};
 
 const EVIDENCE_BYTES: &[u8] = include_bytes!("../../tests/data/dcap.evidence");
 const ENDORSEMENT_BYTES: &[u8] = include_bytes!("../../tests/data/dcap.endorsements");
@@ -132,7 +133,7 @@ impl FakeAttestation {
         let mut uendorsements = SgxEndorsements::try_from(ENDORSEMENT_BYTES).unwrap();
         let signing_info = SigningInfo::default();
         // by default, expire tcb_info/qe_id tomorrow
-        let tomorrow = Utc::now() + chrono::Duration::days(1);
+        let tomorrow = Utc::now() + chrono::Days::new(1);
         uendorsements.tcb_info.next_update = tomorrow;
         uendorsements.qe_id_info.next_update = tomorrow;
         FakeAttestationBuilder {
@@ -162,7 +163,7 @@ pub(crate) struct FakeAttestationBuilder {
 
 impl FakeAttestationBuilder {
     fn sign_data(data: &[u8], key: &EcKeyRef<Private>) -> EcdsaSig {
-        let hash = boring::hash::hash(MessageDigest::sha256(), data).unwrap();
+        let hash = boring_signal::hash::hash(MessageDigest::sha256(), data).unwrap();
         EcdsaSig::sign(&hash, key).unwrap()
     }
 

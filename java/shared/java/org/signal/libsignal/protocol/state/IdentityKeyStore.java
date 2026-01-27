@@ -5,6 +5,7 @@
 
 package org.signal.libsignal.protocol.state;
 
+import org.signal.libsignal.internal.CalledFromNative;
 import org.signal.libsignal.protocol.IdentityKey;
 import org.signal.libsignal.protocol.IdentityKeyPair;
 import org.signal.libsignal.protocol.SignalProtocolAddress;
@@ -14,11 +15,19 @@ import org.signal.libsignal.protocol.SignalProtocolAddress;
  *
  * @author Moxie Marlinspike
  */
+@CalledFromNative
 public interface IdentityKeyStore {
 
+  @CalledFromNative
   public enum Direction {
     SENDING,
     RECEIVING
+  }
+
+  // This must be kept in sync with the Rust enum of the same name.
+  public enum IdentityChange {
+    NEW_OR_UNCHANGED,
+    REPLACED_EXISTING
   }
 
   /**
@@ -47,7 +56,7 @@ public interface IdentityKeyStore {
    * @param identityKey The remote client's identity key.
    * @return True if the identity key replaces a previous identity, false if not
    */
-  public boolean saveIdentity(SignalProtocolAddress address, IdentityKey identityKey);
+  public IdentityChange saveIdentity(SignalProtocolAddress address, IdentityKey identityKey);
 
   /**
    * Verify a remote client's identity key.

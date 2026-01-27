@@ -7,5 +7,6 @@ mod auth_credential;
 
 pub use auth_credential::{
     BackupAuthCredential, BackupAuthCredentialPresentation, BackupAuthCredentialRequest,
-    BackupAuthCredentialRequestContext, BackupAuthCredentialResponse,
+    BackupAuthCredentialRequestContext, BackupAuthCredentialResponse, BackupCredentialType,
+    BackupLevel,
 };

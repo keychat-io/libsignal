@@ -3,16 +3,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import { randomBytes } from 'crypto';
-import { RANDOM_LENGTH } from '../internal/Constants';
-import * as Native from '../../../Native';
+import { randomBytes } from 'node:crypto';
+import { RANDOM_LENGTH } from '../internal/Constants.js';
+import * as Native from '../../Native.js';
 
-import ServerSecretParams from '../ServerSecretParams';
-import AuthCredentialResponse from './AuthCredentialResponse';
-import AuthCredentialPresentation from './AuthCredentialPresentation';
-import AuthCredentialWithPniResponse from './AuthCredentialWithPniResponse';
-import GroupPublicParams from '../groups/GroupPublicParams';
-import { Aci, Pni } from '../../Address';
+import ServerSecretParams from '../ServerSecretParams.js';
+import AuthCredentialPresentation from './AuthCredentialPresentation.js';
+import AuthCredentialWithPniResponse from './AuthCredentialWithPniResponse.js';
+import GroupPublicParams from '../groups/GroupPublicParams.js';
+import { Aci, Pni } from '../../Address.js';
 
 export default class ServerZkAuthOperations {
   serverSecretParams: ServerSecretParams;
@@ -21,38 +20,14 @@ export default class ServerZkAuthOperations {
     this.serverSecretParams = serverSecretParams;
   }
 
-  issueAuthCredential(
-    aci: Aci,
-    redemptionTime: number
-  ): AuthCredentialResponse {
-    const random = randomBytes(RANDOM_LENGTH);
-
-    return this.issueAuthCredentialWithRandom(random, aci, redemptionTime);
-  }
-
-  issueAuthCredentialWithRandom(
-    random: Buffer,
-    aci: Aci,
-    redemptionTime: number
-  ): AuthCredentialResponse {
-    return new AuthCredentialResponse(
-      Native.ServerSecretParams_IssueAuthCredentialDeterministic(
-        this.serverSecretParams.getContents(),
-        random,
-        aci.getServiceIdFixedWidthBinary(),
-        redemptionTime
-      )
-    );
-  }
-
-  issueAuthCredentialWithPniAsServiceId(
+  issueAuthCredentialWithPniZkc(
     aci: Aci,
     pni: Pni,
     redemptionTime: number
   ): AuthCredentialWithPniResponse {
     const random = randomBytes(RANDOM_LENGTH);
 
-    return this.issueAuthCredentialWithPniAsServiceIdWithRandom(
+    return this.issueAuthCredentialWithPniZkcWithRandom(
       random,
       aci,
       pni,
@@ -60,47 +35,15 @@ export default class ServerZkAuthOperations {
     );
   }
 
-  issueAuthCredentialWithPniAsServiceIdWithRandom(
-    random: Buffer,
+  issueAuthCredentialWithPniZkcWithRandom(
+    random: Uint8Array,
     aci: Aci,
     pni: Pni,
     redemptionTime: number
   ): AuthCredentialWithPniResponse {
     return new AuthCredentialWithPniResponse(
-      Native.ServerSecretParams_IssueAuthCredentialWithPniAsServiceIdDeterministic(
-        this.serverSecretParams.getContents(),
-        random,
-        aci.getServiceIdFixedWidthBinary(),
-        pni.getServiceIdFixedWidthBinary(),
-        redemptionTime
-      )
-    );
-  }
-
-  issueAuthCredentialWithPniAsAci(
-    aci: Aci,
-    pni: Pni,
-    redemptionTime: number
-  ): AuthCredentialWithPniResponse {
-    const random = randomBytes(RANDOM_LENGTH);
-
-    return this.issueAuthCredentialWithPniAsAciWithRandom(
-      random,
-      aci,
-      pni,
-      redemptionTime
-    );
-  }
-
-  issueAuthCredentialWithPniAsAciWithRandom(
-    random: Buffer,
-    aci: Aci,
-    pni: Pni,
-    redemptionTime: number
-  ): AuthCredentialWithPniResponse {
-    return new AuthCredentialWithPniResponse(
-      Native.ServerSecretParams_IssueAuthCredentialWithPniAsAciDeterministic(
-        this.serverSecretParams.getContents(),
+      Native.ServerSecretParams_IssueAuthCredentialWithPniZkcDeterministic(
+        this.serverSecretParams,
         random,
         aci.getServiceIdFixedWidthBinary(),
         pni.getServiceIdFixedWidthBinary(),
@@ -115,7 +58,7 @@ export default class ServerZkAuthOperations {
     now: Date = new Date()
   ): void {
     Native.ServerSecretParams_VerifyAuthCredentialPresentation(
-      this.serverSecretParams.getContents(),
+      this.serverSecretParams,
       groupPublicParams.getContents(),
       authCredentialPresentation.getContents(),
       Math.floor(now.getTime() / 1000)

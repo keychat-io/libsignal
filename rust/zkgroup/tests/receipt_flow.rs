@@ -9,8 +9,8 @@ use zkgroup::crypto::proofs::{ReceiptCredentialIssuanceProof, ReceiptCredentialP
 use zkgroup::crypto::receipt_struct::ReceiptStruct;
 use zkgroup::crypto::{credentials, receipt_credential_request};
 use zkgroup::{
-    RandomnessBytes, ReceiptLevel, ReceiptSerialBytes, ServerSecretParams, Timestamp,
-    RANDOMNESS_LEN, RECEIPT_SERIAL_LEN,
+    RANDOMNESS_LEN, RECEIPT_SERIAL_LEN, RandomnessBytes, ReceiptLevel, ReceiptSerialBytes,
+    ServerSecretParams, Timestamp,
 };
 
 #[test]
@@ -18,7 +18,7 @@ fn test_request_response() {
     let mut sho = Sho::new(b"Test_Receipt_Credential_Request", b"");
 
     // client receives in response to initial request
-    let receipt_expiration_time: Timestamp = 42;
+    let receipt_expiration_time: Timestamp = Timestamp::from_epoch_seconds(42);
     let receipt_level: ReceiptLevel = 3;
 
     // known to client and redemption server
@@ -97,7 +97,7 @@ fn test_api() {
     let request = context.get_request();
 
     // issuance server
-    let receipt_expiration_time: Timestamp = 31337;
+    let receipt_expiration_time: Timestamp = Timestamp::from_epoch_seconds(31337);
     let receipt_level: ReceiptLevel = 3;
     let response = server_secret_params.issue_receipt_credential(
         randomness2,

@@ -14,7 +14,7 @@ use crate::state::{
     KyberPreKeyId, KyberPreKeyRecord, PreKeyId, PreKeyRecord, SessionRecord, SignedPreKeyId,
     SignedPreKeyRecord,
 };
-use crate::{IdentityKey, IdentityKeyPair, ProtocolAddress};
+use crate::{IdentityKey, IdentityKeyPair, ProtocolAddress, PublicKey};
 
 // TODO: consider moving this enum into utils.rs?
 /// Each Signal message can be considered to have exactly two participants, a sender and receiver.
@@ -27,6 +27,17 @@ pub enum Direction {
     Sending,
     /// We are in the context of receiving a message.
     Receiving,
+}
+
+/// The result of saving a new identity key for a protocol address.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, derive_more::TryFrom)]
+#[repr(C)]
+#[try_from(repr)]
+pub enum IdentityChange {
+    /// The protocol address didn't have an identity key or had the same key.
+    NewOrUnchanged,
+    /// The new identity key replaced a different key for the protocol address.
+    ReplacedExisting,
 }
 
 /// Interface defining the identity store, which may be in-memory, on-disk, etc.
@@ -49,16 +60,14 @@ pub trait IdentityKeyStore {
     /// be regenerated.
     async fn get_local_registration_id(&self) -> Result<u32>;
 
-    // TODO: make this into an enum instead of a bool!
     /// Record an identity into the store. The identity is then considered "trusted".
     ///
-    /// The return value represents whether an existing identity was replaced (`Ok(true)`). If it is
-    /// new or hasn't changed, the return value should be `Ok(false)`.
+    /// The return value represents whether an existing identity was replaced.
     async fn save_identity(
         &mut self,
         address: &ProtocolAddress,
         identity: &IdentityKey,
-    ) -> Result<bool>;
+    ) -> Result<IdentityChange>;
 
     /// Return whether an identity is trusted for the role specified by `direction`.
     async fn is_trusted_identity(
@@ -118,8 +127,16 @@ pub trait KyberPreKeyStore {
     ) -> Result<()>;
 
     /// Mark the entry for `kyber_prekey_id` as "used".
-    /// This would mean different things for one-time and last-resort Kyber keys.
-    async fn mark_kyber_pre_key_used(&mut self, kyber_prekey_id: KyberPreKeyId) -> Result<()>;
+    ///
+    /// A one-time Kyber pre-key should be deleted after this point. A last-resort pre-key should
+    /// not immediately be deleted, but should check whether the same combination of pre-keys was
+    /// used with the given base key before, and produce an error if so.
+    async fn mark_kyber_pre_key_used(
+        &mut self,
+        kyber_prekey_id: KyberPreKeyId,
+        ec_prekey_id: SignedPreKeyId,
+        base_key: &PublicKey,
+    ) -> Result<()>;
 }
 
 /// Interface for a Signal client instance to store a session associated with another particular
@@ -197,4 +214,18 @@ pub trait ProtocolStore:
     + IdentityKeyStore
     + RatchetKeyStore
 {
+}
+
+impl IdentityChange {
+    /// Convenience constructor from a boolean `changed` flag.
+    ///
+    /// Returns [`IdentityChange::ReplacedExisting`] if `changed` is `true`,
+    /// otherwise [`IdentityChange::NewOrUnchanged`].
+    pub fn from_changed(changed: bool) -> Self {
+        if changed {
+            Self::ReplacedExisting
+        } else {
+            Self::NewOrUnchanged
+        }
+    }
 }

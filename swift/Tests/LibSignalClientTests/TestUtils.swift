@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-@testable import LibSignalClient
 import XCTest
+
+@testable import LibSignalClient
 
 class BadStore: InMemorySignalProtocolStore {
     enum Error: Swift.Error {
@@ -17,7 +18,7 @@ class BadStore: InMemorySignalProtocolStore {
 }
 
 // Wrapped here so that the test files don't need to use @testable import.
-func sealedSenderMultiRecipientMessageForSingleRecipient(_ message: [UInt8]) throws -> [UInt8] {
+func sealedSenderMultiRecipientMessageForSingleRecipient(_ message: Data) throws -> Data {
     return try LibSignalClient.sealedSenderMultiRecipientMessageForSingleRecipient(message)
 }
 
@@ -38,15 +39,11 @@ func randomBytes(_ count: Int) -> [UInt8] {
 
 extension Sequence where Element == UInt8 {
     internal var hexString: String {
-        func hex(b: UInt8) -> String {
-            let prefix = b & 0xF0 == 0 ? "0" : ""
-            return prefix + String(b, radix: 16)
-        }
-        return self.map(hex).joined(separator: "")
+        Array(self).toHex()
     }
 }
 
-extension Array where Element == UInt8 {
+extension RangeReplaceableCollection where Element == UInt8 {
     internal init?(fromHexString hex: String) {
         guard hex.count % 2 == 0 else {
             return nil
@@ -61,6 +58,23 @@ extension Array where Element == UInt8 {
             self.append(byte)
             from = to
         }
+    }
+}
+
+// Helper for async error assertions until XCTest supports async autoclosures
+// Adapted from https://arturgruchala.com/testing-async-await-exceptions/
+func assertThrowsErrorAsync<T>(
+    _ expression: () async throws -> T,
+    _ message: @autoclosure () -> String = "",
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    errorHandler: (Error) -> Void = { _ in }
+) async {
+    do {
+        _ = try await expression()
+        XCTFail(message().isEmpty ? "Expected error to be thrown" : message(), file: file, line: line)
+    } catch {
+        errorHandler(error)
     }
 }
 

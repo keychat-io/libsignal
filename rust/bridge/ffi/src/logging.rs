@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use std::ffi::{c_char, CString};
+use std::ffi::{CString, c_char, c_void};
 
 #[repr(C)]
 pub enum LogLevel {
@@ -41,33 +41,30 @@ impl From<LogLevel> for log::Level {
 }
 
 pub type LogCallback = extern "C" fn(
-    target: *const c_char,
+    ctx: *mut c_void,
     level: LogLevel,
     file: *const c_char,
     line: u32,
     message: *const c_char,
 );
 
-pub type LogEnabledCallback = extern "C" fn(target: *const c_char, level: LogLevel) -> bool;
-
-pub type LogFlushCallback = extern "C" fn();
+pub type LogFlushCallback = extern "C" fn(ctx: *mut c_void);
 
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct FfiLogger {
-    enabled: LogEnabledCallback,
+    ctx: *mut c_void,
     log: LogCallback,
     flush: LogFlushCallback,
 }
 
+// It's up to the other side of the bridge to provide a Sync-friendly context.
+unsafe impl Send for FfiLogger {}
+unsafe impl Sync for FfiLogger {}
+
 impl log::Log for FfiLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        if !libsignal_bridge::logging::log_enabled_in_apps(metadata) {
-            return false;
-        }
-
-        let target = CString::new(metadata.target()).expect("no 0 bytes in log target");
-        (self.enabled)(target.as_ptr(), metadata.level().into())
+        libsignal_bridge::logging::log_enabled_in_apps(metadata)
     }
 
     fn log(&self, record: &log::Record) {
@@ -75,7 +72,6 @@ impl log::Log for FfiLogger {
             return;
         }
 
-        let target = CString::new(record.target()).expect("no 0 bytes in log target");
         let file = record
             .file()
             .map(|file| CString::new(file).expect("no 0 bytes in file"));
@@ -84,7 +80,7 @@ impl log::Log for FfiLogger {
                 .expect("We escaped any NULLs")
         });
         (self.log)(
-            target.as_ptr(),
+            self.ctx,
             record.level().into(),
             file.as_ref()
                 .map(|file| file.as_ptr())
@@ -95,12 +91,12 @@ impl log::Log for FfiLogger {
     }
 
     fn flush(&self) {
-        (self.flush)()
+        (self.flush)(self.ctx)
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn signal_init_logger(max_level: LogLevel, logger: FfiLogger) {
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn signal_init_logger(max_level: LogLevel, logger: FfiLogger) -> bool {
     match log::set_logger(Box::leak(Box::new(logger))) {
         Ok(_) => {
             log::set_max_level(log::Level::from(max_level).to_level_filter());
@@ -108,12 +104,17 @@ pub unsafe extern "C" fn signal_init_logger(max_level: LogLevel, logger: FfiLogg
                 "Initializing libsignal version:{}",
                 env!("CARGO_PKG_VERSION")
             );
+            // These strings are explicitly looked for by build_ffi.sh.
+            log::debug!("THIS BUILD HAS DEBUG-LEVEL LOGS ENABLED");
+            log::trace!("THIS BUILD HAS TRACE-LEVEL LOGS ENABLED");
             log_panics::Config::new()
                 .backtrace_mode(log_panics::BacktraceMode::Unresolved)
                 .install_panic_hook();
+            true
         }
         Err(_) => {
             log::warn!("logging already initialized for libsignal; ignoring later call");
+            false
         }
     }
 }

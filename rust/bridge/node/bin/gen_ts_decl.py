@@ -5,28 +5,45 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 
+import collections
 import difflib
 import itertools
 import os
-import subprocess
 import re
+import subprocess
 import sys
+from typing import Iterable, Iterator, Tuple
+
+Args = collections.namedtuple('Args', ['verify'])
 
 
-# If the command-line handling below gets any more complicated, this should be switched to argparse.
-def print_usage_and_exit():
-    print('usage: %s [--verify]' % sys.argv[0], file=sys.stderr)
-    sys.exit(2)
+def parse_args() -> Args:
+    def print_usage_and_exit() -> None:
+        print('usage: %s [--verify]' % sys.argv[0], file=sys.stderr)
+        sys.exit(2)
+
+    # If the command-line handling below gets any more complicated, this should be switched to argparse.
+    mode = None
+    if len(sys.argv) > 2:
+        print_usage_and_exit()
+    elif len(sys.argv) == 2:
+        mode = sys.argv[1]
+        if mode != '--verify':
+            print_usage_and_exit()
+
+    return Args(verify=mode is not None)
 
 
-def split_args(args):
+def split_rust_args(args: str) -> Iterator[Tuple[str, str]]:
     """
     Split Rust `arg: Type` pairs separated by commas.
 
     Account for templates, tuples, and slices.
     """
-    while ':' in args:
-        (name, args) = args.split(':', maxsplit=1)
+    while ': ' in args:
+        (name, args) = args.split(': ', maxsplit=1)
+        if name.startswith('mut '):
+            name = name[4:]
         open_pairs = 0
         for (i, c) in enumerate(args):
             if c == ',' and open_pairs == 0:
@@ -42,36 +59,46 @@ def split_args(args):
             yield (name.strip(), args.strip())
 
 
-def translate_to_ts(typ):
+def translate_to_ts(typ: str) -> str:
     typ = typ.replace(' ', '')
 
     type_map = {
-        "()": "void",
-        "&[u8]": "Buffer",
-        "i32": "number",
-        "u8": "number",
-        "u32": "number",
-        "u64": "bigint",
-        "bool": "boolean",
-        "String": "string",
-        "&str": "string",
-        "Vec<u8>": "Buffer",
-        "Box<[u8]>": "Buffer",
-        "ServiceId": "Buffer",
-        "Aci": "Buffer",
-        "Pni": "Buffer",
-        "E164": "string",
-        "ServiceIdSequence<'_>": "Buffer",
+        '()': 'void',
+        '&[u8]': 'Uint8Array',
+        'i32': 'number',
+        'u8': 'number',
+        'u16': 'number',
+        'u32': 'number',
+        'u64': 'bigint',
+        'bool': 'boolean',
+        'String': 'string',
+        '&str': 'string',
+        'Vec<u8>': 'Uint8Array',
+        'Box<[u8]>': 'Uint8Array',
+        'bytes::Bytes': 'Uint8Array',
+        'ServiceId': 'Uint8Array',
+        'Aci': 'Uint8Array',
+        'Pni': 'Uint8Array',
+        'E164': 'string',
+        "ServiceIdSequence<'_>": 'Uint8Array',
+        'PathAndQuery': 'string',
+        'LanguageList': 'string[]',
+        '&BackupKey': 'Uint8Array',
+        'MultiRecipientSendAuthorization': 'Uint8Array|null',
+        'DisconnectCause': 'Error|null',
     }
 
     if typ in type_map:
         return type_map[typ]
 
     if typ.startswith('[u8;') or typ.startswith('&[u8;'):
-        return 'Buffer'
+        return 'Uint8Array'
 
     if typ.startswith('&mutdyn'):
         return typ[7:]
+
+    if typ.startswith('&dyn'):
+        return typ[4:]
 
     if typ.startswith('&mut'):
         return 'Wrapper<' + typ[4:] + '>'
@@ -84,6 +111,14 @@ def translate_to_ts(typ):
         assert typ.endswith(']>')
         return translate_to_ts(typ[5:-2]) + '[]'
 
+    if typ.startswith('Box<dyn'):
+        assert typ.endswith('>')
+        return translate_to_ts(typ[7:-1])
+
+    if typ.startswith('Vec<'):
+        assert typ.endswith('>')
+        return translate_to_ts(typ[4:-1]) + '[]'
+
     if typ.startswith('&['):
         assert typ.endswith(']')
         return 'Wrapper<' + translate_to_ts(typ[2:-1]) + '>[]'
@@ -91,21 +126,40 @@ def translate_to_ts(typ):
     if typ.startswith('&'):
         return 'Wrapper<' + typ[1:] + '>'
 
+    if typ.startswith('('):
+        assert typ.endswith(')'), typ
+        inner = typ[1:-1].split(',')
+        if len(inner) == 1:
+            return translate_to_ts(inner[0])
+        return '[' + ', '.join(translate_to_ts(x) for x in inner) + ']'
+
     if typ.startswith('Option<'):
         assert typ.endswith('>')
         return translate_to_ts(typ[7:-1]) + ' | null'
 
     if typ.startswith('Result<'):
         assert typ.endswith('>')
-        if ',' in typ:
-            success_type = typ[7:].split(',')[0]
-        else:
-            success_type = typ[7:-1]
+        type_args = typ[7:-1]
+        (success_type, *failure_type) = type_args.rsplit(',', 1)
+        if failure_type and ')' in failure_type[0]:
+            success_type = type_args
+        return translate_to_ts(success_type)
+
+    if typ.startswith('std::result::Result<'):
+        assert typ.endswith('>')
+        type_args = typ[20:-1]
+        (success_type, *failure_type) = type_args.rsplit(',', 1)
+        if failure_type and ')' in failure_type[0]:
+            success_type = type_args
         return translate_to_ts(success_type)
 
     if typ.startswith('Promise<'):
         assert typ.endswith('>')
         return 'Promise<' + translate_to_ts(typ[8:-1]) + '>'
+
+    if typ.startswith('CancellablePromise<'):
+        assert typ.endswith('>')
+        return 'CancellablePromise<' + translate_to_ts(typ[19:-1]) + '>'
 
     if typ.startswith('AsType<'):
         assert typ.endswith('>')
@@ -119,13 +173,18 @@ def translate_to_ts(typ):
     return typ
 
 
-ignore_this_warning = re.compile(
-    "("
-    r"warning: \d+ warnings? emitted"
-    ")")
+DIAGNOSTICS_TO_IGNORE = [
+    r'warning: \d+ warnings? emitted',
+    r'warning: unused import',
+    r'warning: field.+ never read',
+    r'warning: variant.+ never constructed',
+    r'warning: method.+ never used',
+    r'warning: associated function.+ never used',
+]
+SHOULD_IGNORE_PATTERN = re.compile('(' + ')|('.join(DIAGNOSTICS_TO_IGNORE) + ')')
 
 
-def camelcase(arg):
+def camelcase(arg: str) -> str:
     return re.sub(
         # Preserve double-underscores and leading underscores,
         # but remove single underscores and capitalize the following letter.
@@ -134,7 +193,34 @@ def camelcase(arg):
         arg)
 
 
-def collect_decls(crate_dir, features=()):
+def rewrite_function_as_property(ts_function: str) -> str:
+    return ts_function.replace('(', ': (', 1).replace('):', ') =>')
+
+
+def rewrite_fn(function_match: re.Match[str]) -> str:
+    (prefix, fn_args, ret_type) = function_match.groups()
+
+    ts_ret_type = translate_to_ts(ret_type)
+    ts_args = []
+
+    for (arg_name, arg_type) in split_rust_args(fn_args):
+        ts_arg_type = translate_to_ts(arg_type)
+        ts_args.append('%s: %s' % (camelcase(arg_name.strip()), ts_arg_type))
+
+    return '%s(%s): %s;' % (prefix, ', '.join(ts_args), ts_ret_type)
+
+
+def rewrite_trait(decl: str, function_sig: re.Pattern[str]) -> Iterator[str]:
+    for line in decl.split('\\n'):
+        if function_match := function_sig.match(line.rstrip(';')):
+            yield '  ' + rewrite_function_as_property(rewrite_fn(function_match))
+            continue
+
+        # Fix backslash-escaped double-quotes.
+        yield bytes(line, 'utf-8').decode('unicode_escape')
+
+
+def collect_decls(crate_dir: str, features: Iterable[str] = ()) -> Iterator[str]:
     args = [
         'cargo',
         'rustc',
@@ -142,28 +228,29 @@ def collect_decls(crate_dir, features=()):
         '--profile=check',
         '--features', ','.join(features),
         '--message-format=short',
+        '--color=never',
         '--',
         '-Zunpretty=expanded']
     rustc = subprocess.Popen(args, cwd=crate_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    (stdout, stderr) = rustc.communicate()
+    (raw_stdout, raw_stderr) = rustc.communicate()
 
-    stdout = str(stdout.decode('utf8'))
-    stderr = str(stderr.decode('utf8'))
+    stdout = str(raw_stdout.decode('utf8'))
+    stderr = str(raw_stderr.decode('utf8'))
 
     had_error = False
     for l in stderr.split('\n'):
-        if l == "":
+        if l == '':
             continue
 
-        if ignore_this_warning.match(l):
+        if SHOULD_IGNORE_PATTERN.search(l):
             continue
 
         print(l, file=sys.stderr)
         had_error = True
 
     if had_error:
-        print("Exiting with error")
+        print('Exiting with error')
         sys.exit(1)
 
     comment_decl = re.compile(r'\s*///\s*ts: (.+)')
@@ -172,7 +259,7 @@ def collect_decls(crate_dir, features=()):
 
     # Make sure /not/ to match arguments with nested parentheses,
     # which won't survive textual splitting below.
-    function_sig = re.compile(r'(.+)\(([^()]*)\): (.+);?')
+    function_sig = re.compile(r'(.+)\(([^()]*)\): (.+)')
 
     for line in stdout.split('\n'):
         match = comment_decl.match(line) or attr_decl.match(line)
@@ -181,61 +268,85 @@ def collect_decls(crate_dir, features=()):
 
         (decl,) = match.groups()
 
-        function_match = function_sig.match(decl)
-        if function_match is None:
-            yield decl
+        if decl.startswith('export /*trait*/ type '):
+            yield '\n'.join(rewrite_trait(decl, function_sig))
             continue
 
-        (prefix, args, ret_type) = function_match.groups()
+        if function_match := function_sig.match(decl):
+            yield rewrite_fn(function_match)
+            continue
 
-        ts_ret_type = translate_to_ts(ret_type)
-        ts_args = []
-        if '::' in args:
-            raise Exception(f'Paths are not supported. Use alias for the type of \'{args}\'')
-
-        for (arg_name, arg_type) in split_args(args):
-            ts_arg_type = translate_to_ts(arg_type)
-            ts_args.append('%s: %s' % (camelcase(arg_name.strip()), ts_arg_type))
-
-        yield '%s(%s): %s;' % (prefix, ', '.join(ts_args), ts_ret_type)
+        # Fix backslash-escaped double-quotes.
+        yield bytes(decl, 'utf-8').decode('unicode_escape')
 
 
-mode = None
-if len(sys.argv) > 2:
-    print_usage_and_exit()
-elif len(sys.argv) == 2:
-    mode = sys.argv[1]
-    if mode != '--verify':
-        print_usage_and_exit()
+def expand_template(template_file: str, decls: Iterable[str]) -> str:
+    decls = list(decls)
+    with open(template_file, 'r') as f:
+        contents = f.read()
 
-our_abs_dir = os.path.dirname(os.path.realpath(__file__))
+        # Rewrite from function syntax to property syntax to take advantage of
+        # https://www.typescriptlang.org/tsconfig/#strictFunctionTypes.
+        contents = contents.replace('NATIVE_FNS;', '\n  '.join(
+            rewrite_function_as_property(x.removeprefix('export function '))
+            for x in decls if x.startswith('export function ')
+        ))
+        contents = contents.replace('NATIVE_FN_NAMES', ''.join(
+            '\n  ' + x.removeprefix('export function ').split('(')[0] + ','
+            for x in decls if x.startswith('export function ')
+        ) + '\n')
+        contents = contents.replace('NATIVE_TYPES;', '\n'.join(
+            'export ' + x.removeprefix('export ') for x in decls if not x.startswith('export function ')
+        ))
 
-decls = itertools.chain(
-    collect_decls(os.path.join(our_abs_dir, '..')),
-    collect_decls(os.path.join(our_abs_dir, '..', '..', 'shared'), features=('node', 'signal-media', 'testing-fns')))
+        return contents
 
-output_file_name = 'Native.d.ts'
-contents = open(os.path.join(our_abs_dir, output_file_name + '.in')).read()
-contents += "\n"
-contents += "\n".join(sorted(decls))
-contents += "\n"
 
-output_file = os.path.join(our_abs_dir, '..', '..', '..', '..', 'node', output_file_name)
-
-if not os.access(output_file, os.F_OK):
-    raise Exception("Didn't find %s where it was expected" % output_file_name)
-
-if not mode:
-    with open(output_file, 'w') as fh:
-        fh.write(contents)
-elif mode == '--verify':
-    with open(output_file) as fh:
+def verify_contents(expected_output_file: str, expected_contents: str) -> None:
+    with open(expected_output_file) as fh:
         current_contents = fh.readlines()
-    diff = difflib.unified_diff(current_contents, contents.splitlines(keepends=True))
+    diff = difflib.unified_diff(current_contents, expected_contents.splitlines(keepends=True))
     first_line = next(diff, None)
     if first_line:
         sys.stdout.write(first_line)
         sys.stdout.writelines(diff)
-        sys.exit("error: %s not up to date; re-run %s!" % (output_file_name, sys.argv[0]))
-else:
-    raise Exception("mode not properly validated")
+        sys.exit(f'error: {expected_output_file} not up to date; re-run {sys.argv[0]}!')
+
+
+Crate = collections.namedtuple('Crate', ['path', 'features'], defaults=[()])
+
+
+def convert_to_typescript(rust_crates: Iterable[Crate], ts_in_path: str, ts_out_path: str, verify: bool) -> None:
+    decls = itertools.chain.from_iterable(collect_decls(crate.path, crate.features) for crate in rust_crates)
+    contents = expand_template(ts_in_path, decls)
+
+    if not os.access(ts_out_path, os.F_OK):
+        raise Exception(f"Didn't find {ts_out_path} where it was expected")
+
+    if not verify:
+        with open(ts_out_path, 'w') as fh:
+            fh.write(contents)
+    else:
+        verify_contents(ts_out_path, contents)
+
+
+def main() -> None:
+    args = parse_args()
+    our_abs_dir = os.path.dirname(os.path.realpath(__file__))
+    output_file_name = 'Native.ts'
+
+    convert_to_typescript(
+        rust_crates=[
+            Crate(path=os.path.join(our_abs_dir, '..')),
+            Crate(path=os.path.join(our_abs_dir, '..', '..', 'shared'), features=('node', 'signal-media')),
+            Crate(path=os.path.join(our_abs_dir, '..', '..', 'shared', 'types'), features=('node', 'signal-media')),
+            Crate(path=os.path.join(our_abs_dir, '..', '..', 'shared', 'testing'), features=('node', 'signal-media')),
+        ],
+        ts_in_path=os.path.join(our_abs_dir, output_file_name + '.in'),
+        ts_out_path=os.path.join(our_abs_dir, '..', '..', '..', '..', 'node', 'ts', output_file_name),
+        verify=args.verify,
+    )
+
+
+if __name__ == '__main__':
+    main()

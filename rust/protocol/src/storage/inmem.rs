@@ -7,17 +7,18 @@
 //!
 //! These implementations are purely in-memory, and therefore most likely useful for testing.
 
-use crate::storage::traits;
-use crate::{
-    IdentityKey, IdentityKeyPair, KyberPreKeyId, KyberPreKeyRecord, PreKeyId, PreKeyRecord,
-    ProtocolAddress, Result, SenderKeyRecord, SessionRecord, SignalProtocolError, SignedPreKeyId,
-    SignedPreKeyRecord,
-};
-
-use async_trait::async_trait;
 use std::borrow::Cow;
 use std::collections::HashMap;
+
+use async_trait::async_trait;
 use uuid::Uuid;
+
+use crate::storage::traits::{self, IdentityChange};
+use crate::{
+    CiphertextMessageType, IdentityKey, IdentityKeyPair, KyberPreKeyId, KyberPreKeyRecord,
+    PreKeyId, PreKeyRecord, ProtocolAddress, PublicKey, Result, SenderKeyRecord, SessionRecord,
+    SignalProtocolError, SignedPreKeyId, SignedPreKeyRecord,
+};
 
 /// Reference implementation of [traits::IdentityKeyStore].
 #[derive(Clone)]
@@ -60,18 +61,16 @@ impl traits::IdentityKeyStore for InMemIdentityKeyStore {
         &mut self,
         address: &ProtocolAddress,
         identity: &IdentityKey,
-    ) -> Result<bool> {
+    ) -> Result<IdentityChange> {
         match self.known_keys.get(address) {
             None => {
                 self.known_keys.insert(address.clone(), *identity);
-                Ok(false) // new key
+                Ok(IdentityChange::NewOrUnchanged)
             }
-            Some(k) if k == identity => {
-                Ok(false) // same key
-            }
+            Some(k) if k == identity => Ok(IdentityChange::NewOrUnchanged),
             Some(_k) => {
                 self.known_keys.insert(address.clone(), *identity);
-                Ok(true) // overwrite
+                Ok(IdentityChange::ReplacedExisting)
             }
         }
     }
@@ -195,10 +194,14 @@ impl traits::SignedPreKeyStore for InMemSignedPreKeyStore {
     }
 }
 
-/// Reference implementation of [traits::KyberPreKeyStore].
+/// Basic implementation of [traits::KyberPreKeyStore].
+///
+/// Note that this implementation does not clear any keys upon use! This is correct for last-resort
+/// keys, but a real client would normally have a set of one-time keys to use first.
 #[derive(Clone)]
 pub struct InMemKyberPreKeyStore {
     kyber_pre_keys: HashMap<KyberPreKeyId, KyberPreKeyRecord>,
+    base_keys_seen: HashMap<(KyberPreKeyId, SignedPreKeyId), Vec<PublicKey>>,
 }
 
 impl InMemKyberPreKeyStore {
@@ -206,6 +209,7 @@ impl InMemKyberPreKeyStore {
     pub fn new() -> Self {
         Self {
             kyber_pre_keys: HashMap::new(),
+            base_keys_seen: HashMap::new(),
         }
     }
 
@@ -241,7 +245,23 @@ impl traits::KyberPreKeyStore for InMemKyberPreKeyStore {
         Ok(())
     }
 
-    async fn mark_kyber_pre_key_used(&mut self, _kyber_prekey_id: KyberPreKeyId) -> Result<()> {
+    async fn mark_kyber_pre_key_used(
+        &mut self,
+        kyber_prekey_id: KyberPreKeyId,
+        ec_prekey_id: SignedPreKeyId,
+        base_key: &PublicKey,
+    ) -> Result<()> {
+        let base_keys_seen = self
+            .base_keys_seen
+            .entry((kyber_prekey_id, ec_prekey_id))
+            .or_default();
+        if base_keys_seen.contains(base_key) {
+            return Err(SignalProtocolError::InvalidMessage(
+                CiphertextMessageType::PreKey,
+                "reused base key",
+            ));
+        }
+        base_keys_seen.push(*base_key);
         Ok(())
     }
 }
@@ -503,7 +523,7 @@ impl traits::IdentityKeyStore for InMemSignalProtocolStore {
         &mut self,
         address: &ProtocolAddress,
         identity: &IdentityKey,
-    ) -> Result<bool> {
+    ) -> Result<IdentityChange> {
         self.identity_store.save_identity(address, identity).await
     }
 
@@ -573,9 +593,14 @@ impl traits::KyberPreKeyStore for InMemSignalProtocolStore {
             .await
     }
 
-    async fn mark_kyber_pre_key_used(&mut self, kyber_prekey_id: KyberPreKeyId) -> Result<()> {
+    async fn mark_kyber_pre_key_used(
+        &mut self,
+        kyber_prekey_id: KyberPreKeyId,
+        ec_prekey_id: SignedPreKeyId,
+        base_key: &PublicKey,
+    ) -> Result<()> {
         self.kyber_pre_key_store
-            .mark_kyber_pre_key_used(kyber_prekey_id)
+            .mark_kyber_pre_key_used(kyber_prekey_id, ec_prekey_id, base_key)
             .await
     }
 }
@@ -584,7 +609,8 @@ impl traits::KyberPreKeyStore for InMemSignalProtocolStore {
 impl traits::RatchetKeyStore for InMemSignalProtocolStore {
     async fn load_ratchet_key(&self, their_ephemeral_public: String) -> Result<String> {
         self.ratchet_key_store
-            .load_ratchet_key(their_ephemeral_public).await
+            .load_ratchet_key(their_ephemeral_public)
+            .await
     }
 
     async fn store_ratchet_key(
@@ -594,12 +620,14 @@ impl traits::RatchetKeyStore for InMemSignalProtocolStore {
         their_ephemeral_public: String,
         our_ephemeral_private: String,
     ) -> Result<()> {
-        self.ratchet_key_store.store_ratchet_key(
-            address,
-            room_id,
-            their_ephemeral_public,
-            our_ephemeral_private,
-        ).await
+        self.ratchet_key_store
+            .store_ratchet_key(
+                address,
+                room_id,
+                their_ephemeral_public,
+                our_ephemeral_private,
+            )
+            .await
     }
 
     async fn delete_old_ratchet_key(&self, id: u32, address: String, room_id: u32) -> Result<()> {

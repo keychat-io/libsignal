@@ -9,11 +9,28 @@ import static org.signal.libsignal.internal.FilterExceptions.filterExceptions;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
-import java.util.List;
+import java.util.Collection;
 import java.util.UUID;
+import org.signal.libsignal.internal.CalledFromNative;
 import org.signal.libsignal.internal.Native;
 
-public abstract class ServiceId {
+/**
+ * Typed representation of a Signal service ID, which can be one of various types.
+ *
+ * <p>Conceptually this is a UUID in a particular "namespace" representing a particular way to reach
+ * a user on the Signal service.
+ *
+ * <p>The sort order for ServiceIds is first by kind (ACI, then PNI), then lexicographically by the
+ * bytes of the UUID.
+ */
+public abstract class ServiceId implements Comparable<ServiceId> {
+  /** The kind of a service ID. */
+  public static enum Kind {
+    // This should be kept in sync with the Rust enum of the same name.
+    ACI,
+    PNI,
+  };
+
   private static final byte FIXED_WIDTH_BINARY_LENGTH = 17;
 
   private static final byte ACI_MARKER = 0x00;
@@ -55,6 +72,19 @@ public abstract class ServiceId {
   }
 
   @Override
+  public int compareTo(ServiceId other) {
+    for (int i = 0; i < FIXED_WIDTH_BINARY_LENGTH; ++i) {
+      // We specifically want to be doing an *unsigned* comparison of bytes, to match the Rust code
+      // and other platforms.
+      int comparisonResult = Byte.toUnsignedInt(storage[i]) - Byte.toUnsignedInt(other.storage[i]);
+      if (comparisonResult != 0) {
+        return comparisonResult;
+      }
+    }
+    return 0;
+  }
+
+  @Override
   public String toString() {
     return this.toLogString();
   }
@@ -79,6 +109,10 @@ public abstract class ServiceId {
     ByteBuffer buffer = ByteBuffer.wrap(this.storage);
     byte unusedMarkerByte = buffer.get();
     return uuidFromBytes(buffer.slice());
+  }
+
+  public Kind getKind() {
+    return storage[0] == ACI_MARKER ? Kind.ACI : Kind.PNI;
   }
 
   public static ServiceId parseFromString(String serviceIdString) throws InvalidServiceIdException {
@@ -107,6 +141,7 @@ public abstract class ServiceId {
     return parseFromFixedWidthBinary(storage);
   }
 
+  @CalledFromNative
   public static ServiceId parseFromFixedWidthBinary(byte[] storage)
       throws InvalidServiceIdException {
     if (storage == null) {
@@ -123,7 +158,7 @@ public abstract class ServiceId {
     }
   }
 
-  public static byte[] toConcatenatedFixedWidthBinary(List<ServiceId> serviceIds) {
+  public static byte[] toConcatenatedFixedWidthBinary(Collection<ServiceId> serviceIds) {
     byte[] result = new byte[FIXED_WIDTH_BINARY_LENGTH * serviceIds.size()];
     int offset = 0;
     for (ServiceId next : serviceIds) {

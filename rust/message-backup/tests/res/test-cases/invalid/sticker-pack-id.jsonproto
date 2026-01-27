@@ -1,7 +1,8 @@
 [
   {
     "version": "1",
-    "backupTimeMs": "1705692409729"
+    "backupTimeMs": "1705692409729",
+    "mediaRootBackupKey": "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s=",
   },
   {
     "recipient": {
@@ -20,6 +21,7 @@
       "chatId": "1",
       "authorId": "1",
       "directionless": {},
+      "dateSent": 12345,
       "stickerMessage": {
         "sticker": {
           "packId": "YXNkZgo=",

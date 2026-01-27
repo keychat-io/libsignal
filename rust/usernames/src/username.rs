@@ -4,37 +4,35 @@
 //
 
 use std::fmt::{Debug, Display, Formatter};
-use std::ops::{Add, Range, RangeInclusive};
+use std::ops::{Range, RangeInclusive};
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
 use curve25519_dalek::scalar::Scalar;
-use lazy_static::lazy_static;
-use rand::Rng;
-use sha2::{Digest, Sha512};
-
+use curve25519_dalek::traits::MultiscalarMul;
 use poksho::args::{PointArgs, ScalarArgs};
 use poksho::{PokshoError, Statement};
+use rand::Rng;
+use sha2::{Digest, Sha512};
 
 use crate::constants::{
     BASE_POINTS, CANDIDATES_PER_RANGE, DISCRIMINATOR_RANGES, MAX_NICKNAME_LENGTH,
 };
 use crate::error::{ProofVerificationFailure, UsernameError};
 
-lazy_static! {
-    static ref PROOF_STATEMENT: Statement = {
-        let mut st = Statement::new();
-        st.add(
-            "username_hash",
-            &[
-                ("username_sha_scalar", "G1"),
-                ("nickname_scalar", "G2"),
-                ("discriminator_scalar", "G3"),
-            ],
-        );
-        st
-    };
-}
+static PROOF_STATEMENT: LazyLock<Statement> = LazyLock::new(|| {
+    let mut st = Statement::new();
+    st.add(
+        "username_hash",
+        &[
+            ("username_sha_scalar", "G1"),
+            ("nickname_scalar", "G2"),
+            ("discriminator_scalar", "G3"),
+        ],
+    );
+    st
+});
 
 #[derive(PartialEq)]
 pub struct Username {
@@ -45,7 +43,7 @@ pub struct Username {
 
 impl Display for Username {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}.{}", self.nickname, self.discriminator)
+        write!(f, "{}.{:02}", self.nickname, self.discriminator)
     }
 }
 
@@ -71,14 +69,11 @@ impl NicknameLimits {
     pub fn new(min_len: usize, max_len: usize) -> Self {
         assert!(
             max_len <= MAX_NICKNAME_LENGTH,
-            "Long nicknames are not supported. The maximum supported length is {}",
-            MAX_NICKNAME_LENGTH
+            "Long nicknames are not supported. The maximum supported length is {MAX_NICKNAME_LENGTH}"
         );
         assert!(
             min_len < max_len,
-            "Invalid nickname size limits: {}..{}",
-            min_len,
-            max_len
+            "Invalid nickname size limits: {min_len}..{max_len}"
         );
         NicknameLimits(min_len..=max_len)
     }
@@ -137,14 +132,14 @@ impl Username {
         *Self::hash_from_scalars(&self.scalars).compress().as_bytes()
     }
 
-    pub fn proof(&self, randomness: &[u8]) -> Result<Vec<u8>, UsernameError> {
+    pub fn proof(&self, randomness: &[u8; 32]) -> Result<Vec<u8>, UsernameError> {
         let hash = Self::hash_from_scalars(&self.scalars);
         let scalar_args = Self::make_scalar_args(&self.scalars);
         let point_args = Self::make_point_args(hash);
         let message = *hash.compress().as_bytes();
         PROOF_STATEMENT
             .prove(&scalar_args, &point_args, &message, randomness)
-            .map_err(|e| panic!("Failed to create proof. Cause: PokshoError::{:?}", e))
+            .map_err(|e| panic!("Failed to create proof. Cause: PokshoError::{e:?}"))
     }
 
     pub fn verify_proof(proof: &[u8], hash: [u8; 32]) -> Result<(), ProofVerificationFailure> {
@@ -156,7 +151,7 @@ impl Username {
             .verify_proof(proof, &point_args, &hash)
             .map_err(|e| match e {
                 PokshoError::VerificationFailure => ProofVerificationFailure,
-                _ => panic!("Unexpected verification error PokshoError::{:?}", e),
+                _ => panic!("Unexpected verification error PokshoError::{e:?}"),
             })
     }
 
@@ -167,7 +162,6 @@ impl Username {
     ) -> Result<Vec<String>, UsernameError> {
         validate_nickname(nickname, &limits)?;
         let candidates = random_discriminators(rng, &CANDIDATES_PER_RANGE, &DISCRIMINATOR_RANGES)
-            .unwrap()
             .iter()
             .map(|d| Self::format_parts(nickname, d))
             .collect();
@@ -179,12 +173,10 @@ impl Username {
     }
 
     fn hash_from_scalars(scalars: &[Scalar]) -> RistrettoPoint {
-        BASE_POINTS
-            .iter()
-            .zip(scalars)
-            .map(|(point, scalar)| point * scalar)
-            .reduce(RistrettoPoint::add)
-            .unwrap()
+        // Will panic if the number of scalars doesn't match the number of base points.
+        // If we ever change the encoding to not use a fixed number of scalars, this will need to be
+        // updated.
+        RistrettoPoint::multiscalar_mul(scalars, BASE_POINTS.iter())
     }
 
     fn make_scalar_args(scalars: &[Scalar]) -> ScalarArgs {
@@ -336,21 +328,21 @@ fn random_discriminators<R: Rng>(
     rng: &mut R,
     count_per_range: &[usize],
     ranges: &[Range<usize>],
-) -> Result<Vec<usize>, UsernameError> {
+) -> Vec<usize> {
     assert!(count_per_range.len() <= ranges.len(), "Not enough ranges");
     let total_count: usize = count_per_range.iter().sum();
     let mut results = Vec::with_capacity(total_count);
     for (n, range) in count_per_range.iter().zip(ranges) {
         results.extend(gen_range(rng, range, *n));
     }
-    Ok(results)
+    results
 }
 
 fn gen_range<'a, R: Rng>(
     rng: &mut R,
     range: &'a Range<usize>,
     amount: usize,
-) -> impl Iterator<Item = usize> + 'a {
+) -> impl Iterator<Item = usize> + use<'a, R> {
     let length = range.end - range.start;
     let indices = rand::seq::index::sample(rng, length, amount);
     indices.into_iter().map(move |i| range.start + i)
@@ -374,8 +366,12 @@ mod test {
 
     #[test]
     fn valid_usernames() {
-        for username in ["He110.01", "usr.999999999", "_identifier.42"] {
-            Username::new(username).map(|name| name.hash()).unwrap();
+        for username in ["He110.01", "usr.999999999", "_identifier.42", "LOUD.700"] {
+            let parsed = Username::new(username).unwrap();
+            _ = parsed.hash();
+            // Note that parsing is case-preserving even though username hashes are
+            // case-insensitive.
+            assert_eq!(parsed.to_string(), username);
         }
     }
 
@@ -498,7 +494,7 @@ mod test {
         proptest!(|(nickname in NICKNAME_PATTERN, discriminator in 1..DISCRIMINATOR_MAX)| {
             let username = Username::new(&Username::format_parts(&nickname, discriminator)).unwrap();
             let hash = username.hash();
-            let randomness: Vec<u8> = (1..33).collect();
+            let randomness = std::array::from_fn(|i| (i + 1).try_into().unwrap());
             let proof = username.proof(&randomness).unwrap();
             Username::verify_proof(&proof, hash).unwrap();
         });
@@ -506,8 +502,8 @@ mod test {
 
     #[test]
     fn many_random_makes_valid_usernames() {
-        let mut rng = rand::thread_rng();
-        let randomness: Vec<u8> = (1..33).collect();
+        let mut rng = rand::rng();
+        let randomness = std::array::from_fn(|i| (i + 1).try_into().unwrap());
         let nickname = "_SiGNA1";
         let candidates = Username::candidates_from(&mut rng, nickname, Default::default()).unwrap();
         for c in &candidates {
@@ -521,8 +517,8 @@ mod test {
 
     #[test]
     fn generate_discriminators() {
-        let mut rng = rand::thread_rng();
-        let ds = random_discriminators(&mut rng, &[4, 3, 2, 1], &DISCRIMINATOR_RANGES).unwrap();
+        let mut rng = rand::rng();
+        let ds = random_discriminators(&mut rng, &[4, 3, 2, 1], &DISCRIMINATOR_RANGES);
         assert!(DISCRIMINATOR_RANGES[0].contains(&ds[0]));
         assert!(DISCRIMINATOR_RANGES[0].contains(&ds[1]));
         assert!(DISCRIMINATOR_RANGES[0].contains(&ds[2]));
@@ -538,7 +534,7 @@ mod test {
     #[test]
     #[should_panic]
     fn too_few_ranges() {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let counts: Vec<usize> = (0usize..DISCRIMINATOR_RANGES.len() + 1).collect();
         let _ = random_discriminators(&mut rng, &counts, &DISCRIMINATOR_RANGES);
     }

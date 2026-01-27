@@ -4,14 +4,12 @@
 //
 
 use std::cmp::Ordering;
-
 use std::time::{Duration, SystemTime};
 
 use boring::asn1::Asn1Time;
 use boring::pkey::PKey;
 use boring::rsa::Padding;
 use boring::x509::X509;
-
 use device_transfer::*;
 
 #[test]
@@ -22,7 +20,7 @@ fn test_generate_and_parse() -> Result<(), Error> {
         let days_to_expire = 10;
         let cert = create_self_signed_cert(&key, "test", days_to_expire)?;
 
-        println!("Key format: {:?}", key_format);
+        println!("Key format: {key_format:?}");
         println!("key = {}", hex::encode(&key));
         println!("cert = {}", hex::encode(&cert));
 

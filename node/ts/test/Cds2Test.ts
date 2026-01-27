@@ -4,11 +4,13 @@
 //
 
 import { assert, use } from 'chai';
-import * as chaiAsPromised from 'chai-as-promised';
-import * as SignalClient from '../index';
-import * as util from './util';
+import chaiAsPromised from 'chai-as-promised';
+import { Buffer } from 'node:buffer';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+
+import * as SignalClient from '../index.js';
+import * as util from './util.js';
 
 use(chaiAsPromised);
 util.initLogger();
@@ -21,7 +23,7 @@ describe('Cds2Client', () => {
   const currentDate = new Date(1655857680000);
 
   const attestationMessage = fs.readFileSync(
-    path.join(__dirname, '../../ts/test/cds2handshakestart.data')
+    path.join(import.meta.dirname, '../../ts/test/cds2handshakestart.data')
   );
 
   it('create client', () => {
@@ -31,7 +33,7 @@ describe('Cds2Client', () => {
       currentDate
     );
     const initialMessage = cds2Client.initialRequest();
-    assert.lengthOf(initialMessage, 48, 'initial message length');
+    assert.lengthOf(initialMessage, 1632, 'initial message length');
   });
   it('invalid mrenclave', () => {
     const invalidMrenclave = Buffer.from([]);

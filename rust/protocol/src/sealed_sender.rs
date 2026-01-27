@@ -3,29 +3,28 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use crate::{
-    message_encrypt, Aci, CiphertextMessageType, DeviceId, Direction, IdentityKey, IdentityKeyPair,
-    IdentityKeyStore, KeyPair, KyberPreKeyStore, PreKeySignalMessage, PreKeyStore, PrivateKey,
-    ProtocolAddress, PublicKey, RatchetKeyStore, Result, ServiceId, ServiceIdFixedWidthBinaryBytes,
-    SessionRecord, SessionStore, SignalMessage, SignalProtocolError, SignedPreKeyStore,
-};
-
-use crate::{crypto, curve, proto, session_cipher};
+use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::LazyLock;
+use std::time::SystemTime;
 
 use aes_gcm_siv::aead::generic_array::typenum::Unsigned;
 use aes_gcm_siv::{AeadInPlace, Aes256GcmSiv, KeyInit};
-use arrayref::array_ref;
-use curve25519_dalek::scalar::Scalar;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use prost::Message;
-use rand::{CryptoRng, Rng};
-use subtle::ConstantTimeEq;
-
 use proto::sealed_sender::unidentified_sender_message::message::Type as ProtoMessageType;
+use rand::{CryptoRng, Rng, TryRngCore as _};
+use subtle::{Choice, ConstantTimeEq};
+use zerocopy::{FromBytes, Immutable, KnownLayout};
 
-use std::ops::Range;
-use std::time::SystemTime;
+use crate::{
+    Aci, CiphertextMessageType, DeviceId, Direction, IdentityKey, IdentityKeyPair,
+    IdentityKeyStore, KeyPair, KyberPreKeyStore, PreKeySignalMessage, PreKeyStore, PrivateKey,
+    ProtocolAddress, PublicKey, RatchetKeyStore, Result, ServiceId, ServiceIdFixedWidthBinaryBytes,
+    SessionRecord, SessionStore, SignalMessage, SignalProtocolError, SignedPreKeyStore, Timestamp,
+    crypto, message_encrypt, proto, session_cipher,
+};
 
 #[derive(Debug, Clone)]
 pub struct ServerCertificate {
@@ -46,12 +45,49 @@ with this test certificate ID, Bad Things will happen.
 */
 const REVOKED_SERVER_CERTIFICATE_KEY_IDS: &[u32] = &[0xDEADC357];
 
+/// A set of server certificates that can be omitted from sender certificates for space savings,
+/// keyed by ID.
+///
+/// The middle item is the trust root for the signature in the certificate, used to check integrity
+/// and potentially to filter out irrelevant certificates during validation. This is the serialized
+/// bytes of an XEd25519 public key, without the leading "type byte" used by the PublicKey type.
+///
+/// Technically the ID is also stored in the certificate data, but listing it here makes it easier
+/// for maintainers to tell which certificates are present.
+const KNOWN_SERVER_CERTIFICATES: &[(u32, [u8; 33], &[u8])] = &[
+    (
+        2,
+        // A trust root used in Staging (but this crate doesn't care about staging / production)
+        data_encoding_macro::base64!("BYhU6tPjqP46KGZEzRs1OL4U39V5dlPJ/X09ha4rErkm"),
+        &const_str::hex!(
+            "0a25080212210539450d63ebd0752c0fd4038b9d07a916f5e174b756d409b5ca79f4c97400631e124064c5a38b1e927497d3d4786b101a623ab34a7da3954fae126b04dba9d7a3604ed88cdc8550950f0d4a9134ceb7e19b94139151d2c3d6e1c81e9d1128aafca806"
+        ),
+    ),
+    (
+        3,
+        // A trust root used in Production (but this crate doesn't care about staging / production)
+        data_encoding_macro::base64!("BUkY0I+9+oPgDCn4+Ac6Iu813yvqkDr/ga8DzLxFxuk6"),
+        &const_str::hex!(
+            "0a250803122105bc9d1d290be964810dfa7e94856480a3f7060d004c9762c24c575a1522353a5a1240c11ec3c401eb0107ab38f8600e8720a63169e0e2eb8a3fae24f63099f85ea319c3c1c46d3454706ae2a679d1fee690a488adda98a2290b66c906bb60295ed781"
+        ),
+    ),
+    (
+        // "Test cert"
+        0x7357C357,
+        // This is the public key that corresponds to a private key of all zeros, which will never
+        // be used in a real service or trusted by a real app.
+        data_encoding_macro::base64!("BS/lfaNHzWJDFSjarF+7KQcw//aEr8TPwu2QmV9Yyzt0"),
+        // And we use it to sign a server certificate for a private key of all 0xFF bytes, also
+        // never used in a real service.
+        &const_str::hex!(
+            "0a2908d786df9a07122105847c0d2c375234f365e660955187a3735a0f7613d1609d3a6a4d8c53aeaa5a221240e0b9ebacdfc3aa2827f7924b697784d1c25e44ca05dd433e1a38dc6382eb2730d419ca9a250b1be9d5a9463e61efd6781777a91b83c97b844d014206e2829785"
+        ),
+    ),
+];
+
 // Valid registration IDs fit in 14 bits.
 // TODO: move this into a RegistrationId strong type.
 const VALID_REGISTRATION_ID_MASK: u16 = 0x3FFF;
-
-// TODO: validate this as part of constructing DeviceId.
-const MAX_VALID_DEVICE_ID: u32 = 127;
 
 impl ServerCertificate {
     pub fn deserialize(data: &[u8]) -> Result<Self> {
@@ -119,13 +155,6 @@ impl ServerCertificate {
         })
     }
 
-    pub(crate) fn to_protobuf(&self) -> Result<proto::sealed_sender::ServerCertificate> {
-        Ok(proto::sealed_sender::ServerCertificate {
-            certificate: Some(self.certificate.clone()),
-            signature: Some(self.signature.clone()),
-        })
-    }
-
     pub fn validate(&self, trust_root: &PublicKey) -> Result<bool> {
         if REVOKED_SERVER_CERTIFICATE_KEY_IDS.contains(&self.key_id()?) {
             log::error!(
@@ -134,7 +163,7 @@ impl ServerCertificate {
             );
             return Ok(false);
         }
-        trust_root.verify_signature(&self.certificate, &self.signature)
+        Ok(trust_root.verify_signature(&self.certificate, &self.signature))
     }
 
     pub fn key_id(&self) -> Result<u32> {
@@ -159,13 +188,19 @@ impl ServerCertificate {
 }
 
 #[derive(Debug, Clone)]
+enum SenderCertificateSigner {
+    Embedded(ServerCertificate),
+    Reference(u32),
+}
+
+#[derive(Debug, Clone)]
 pub struct SenderCertificate {
-    signer: ServerCertificate,
+    signer: SenderCertificateSigner,
     key: PublicKey,
     sender_device_id: DeviceId,
     sender_uuid: String,
     sender_e164: Option<String>,
-    expiration: u64,
+    expiration: Timestamp,
     serialized: Vec<u8>,
     certificate: Vec<u8>,
     signature: Vec<u8>,
@@ -187,17 +222,37 @@ impl SenderCertificate {
 
         let sender_device_id: DeviceId = certificate_data
             .sender_device
-            .ok_or(SignalProtocolError::InvalidProtobufEncoding)?
-            .into();
+            .and_then(|v| DeviceId::try_from(v).ok())
+            .ok_or(SignalProtocolError::InvalidProtobufEncoding)?;
         let expiration = certificate_data
             .expires
+            .map(Timestamp::from_epoch_millis)
             .ok_or(SignalProtocolError::InvalidProtobufEncoding)?;
-        let signer_pb = certificate_data
+        let signer = match certificate_data
             .signer
-            .ok_or(SignalProtocolError::InvalidProtobufEncoding)?;
-        let sender_uuid = certificate_data
+            .ok_or(SignalProtocolError::InvalidProtobufEncoding)?
+        {
+            proto::sealed_sender::sender_certificate::certificate::Signer::Certificate(encoded) => {
+                SenderCertificateSigner::Embedded(ServerCertificate::deserialize(&encoded)?)
+            }
+            proto::sealed_sender::sender_certificate::certificate::Signer::Id(id) => {
+                SenderCertificateSigner::Reference(id)
+            }
+        };
+        let sender_uuid = match certificate_data
             .sender_uuid
-            .ok_or(SignalProtocolError::InvalidProtobufEncoding)?;
+            .ok_or(SignalProtocolError::InvalidProtobufEncoding)?
+        {
+            proto::sealed_sender::sender_certificate::certificate::SenderUuid::UuidString(
+                uuid_str,
+            ) => uuid_str,
+            proto::sealed_sender::sender_certificate::certificate::SenderUuid::UuidBytes(raw) => {
+                // For now, map this back to a string locally.
+                uuid::Uuid::from_slice(&raw)
+                    .map_err(|_| SignalProtocolError::InvalidProtobufEncoding)?
+                    .to_string()
+            }
+        };
         let sender_e164 = certificate_data.sender_e164;
 
         let key = PublicKey::try_from(
@@ -205,9 +260,6 @@ impl SenderCertificate {
                 .identity_key
                 .ok_or(SignalProtocolError::InvalidProtobufEncoding)?[..],
         )?;
-
-        let signer_bits = signer_pb.encode_to_vec();
-        let signer = ServerCertificate::deserialize(&signer_bits)?;
 
         Ok(Self {
             signer,
@@ -227,18 +279,26 @@ impl SenderCertificate {
         sender_e164: Option<String>,
         key: PublicKey,
         sender_device_id: DeviceId,
-        expiration: u64,
+        expiration: Timestamp,
         signer: ServerCertificate,
         signer_key: &PrivateKey,
         rng: &mut R,
     ) -> Result<Self> {
         let certificate_pb = proto::sealed_sender::sender_certificate::Certificate {
-            sender_uuid: Some(sender_uuid.clone()),
+            sender_uuid: Some(
+                proto::sealed_sender::sender_certificate::certificate::SenderUuid::UuidString(
+                    sender_uuid.clone(),
+                ),
+            ),
             sender_e164: sender_e164.clone(),
             sender_device: Some(sender_device_id.into()),
-            expires: Some(expiration),
+            expires: Some(expiration.epoch_millis()),
             identity_key: Some(key.serialize().to_vec()),
-            signer: Some(signer.to_protobuf()?),
+            signer: Some(
+                proto::sealed_sender::sender_certificate::certificate::Signer::Certificate(
+                    signer.serialized()?.to_vec(),
+                ),
+            ),
         };
 
         let certificate = certificate_pb.encode_to_vec();
@@ -252,7 +312,7 @@ impl SenderCertificate {
         .encode_to_vec();
 
         Ok(Self {
-            signer,
+            signer: SenderCertificateSigner::Embedded(signer),
             key,
             sender_device_id,
             sender_uuid,
@@ -264,26 +324,43 @@ impl SenderCertificate {
         })
     }
 
-    pub fn validate(&self, trust_root: &PublicKey, validation_time: u64) -> Result<bool> {
-        if !self.signer.validate(trust_root)? {
-            log::error!("received server certificate not signed by trust root");
+    pub fn validate(&self, trust_root: &PublicKey, validation_time: Timestamp) -> Result<bool> {
+        self.validate_with_trust_roots(&[trust_root], validation_time)
+    }
+
+    pub fn validate_with_trust_roots(
+        &self,
+        trust_roots: &[&PublicKey],
+        validation_time: Timestamp,
+    ) -> Result<bool> {
+        let signer = self.signer()?;
+
+        // Check the signer against every trust root to hide which one was the correct one.
+        let mut any_valid = Choice::from(0u8);
+        for root in trust_roots {
+            let ok = signer.validate(root)?;
+            any_valid |= Choice::from(u8::from(ok));
+        }
+        if !bool::from(any_valid) {
+            log::error!(
+                "sender certificate contained server certificate that wasn't signed by any trust root"
+            );
             return Ok(false);
         }
 
-        if !self
-            .signer
+        if !signer
             .public_key()?
-            .verify_signature(&self.certificate, &self.signature)?
+            .verify_signature(&self.certificate, &self.signature)
         {
-            log::error!("received sender certificate not signed by server");
+            log::error!("sender certificate not signed by server");
             return Ok(false);
         }
 
         if validation_time > self.expiration {
             log::error!(
-                "received expired sender certificate (expiration: {}, validation_time: {})",
-                self.expiration,
-                validation_time
+                "sender certificate is expired (expiration: {}, validation_time: {})",
+                self.expiration.epoch_millis(),
+                validation_time.epoch_millis()
             );
             return Ok(false);
         }
@@ -292,7 +369,28 @@ impl SenderCertificate {
     }
 
     pub fn signer(&self) -> Result<&ServerCertificate> {
-        Ok(&self.signer)
+        static CERT_MAP: LazyLock<HashMap<u32, (PublicKey, ServerCertificate)>> =
+            LazyLock::new(|| {
+                HashMap::from_iter(KNOWN_SERVER_CERTIFICATES.iter().map(
+                    |(id, trust_root, cert)| {
+                        (
+                            *id,
+                            (
+                                PublicKey::deserialize(trust_root).expect("valid"),
+                                ServerCertificate::deserialize(cert).expect("valid"),
+                            ),
+                        )
+                    },
+                ))
+            });
+
+        match &self.signer {
+            SenderCertificateSigner::Embedded(cert) => Ok(cert),
+            SenderCertificateSigner::Reference(id) => CERT_MAP
+                .get(id)
+                .map(|(_trust_root, cert)| cert)
+                .ok_or_else(|| SignalProtocolError::UnknownSealedSenderServerCertificateId(*id)),
+        }
     }
 
     pub fn key(&self) -> Result<PublicKey> {
@@ -311,7 +409,7 @@ impl SenderCertificate {
         Ok(self.sender_e164.as_deref())
     }
 
-    pub fn expiration(&self) -> Result<u64> {
+    pub fn expiration(&self) -> Result<Timestamp> {
         Ok(self.expiration)
     }
 
@@ -514,7 +612,7 @@ impl UnidentifiedSenderMessageContent {
     }
 }
 
-enum UnidentifiedSenderMessage {
+enum UnidentifiedSenderMessage<'a> {
     V1 {
         ephemeral_public: PublicKey,
         encrypted_static: Vec<u8>,
@@ -522,9 +620,9 @@ enum UnidentifiedSenderMessage {
     },
     V2 {
         ephemeral_public: PublicKey,
-        encrypted_message_key: Box<[u8]>,
-        authentication_tag: Box<[u8]>,
-        encrypted_message: Box<[u8]>,
+        encrypted_message_key: &'a [u8; sealed_sender_v2::MESSAGE_KEY_LEN],
+        authentication_tag: &'a [u8; sealed_sender_v2::AUTH_TAG_LEN],
+        encrypted_message: &'a [u8],
     },
 }
 
@@ -534,23 +632,18 @@ const SEALED_SENDER_V2_MAJOR_VERSION: u8 = 2;
 const SEALED_SENDER_V2_UUID_FULL_VERSION: u8 = 0x22;
 const SEALED_SENDER_V2_SERVICE_ID_FULL_VERSION: u8 = 0x23;
 
-impl UnidentifiedSenderMessage {
-    fn deserialize(data: &[u8]) -> Result<Self> {
-        if data.is_empty() {
-            return Err(SignalProtocolError::InvalidSealedSenderMessage(
-                "Message was empty".to_owned(),
-            ));
-        }
-        let version = data[0] >> 4;
-        log::debug!(
-            "deserializing UnidentifiedSenderMessage with version {}",
-            version
-        );
+impl<'a> UnidentifiedSenderMessage<'a> {
+    fn deserialize(data: &'a [u8]) -> Result<Self> {
+        let (version_byte, remaining) = data.split_first().ok_or_else(|| {
+            SignalProtocolError::InvalidSealedSenderMessage("Message was empty".to_owned())
+        })?;
+        let version = version_byte >> 4;
+        log::debug!("deserializing UnidentifiedSenderMessage with version {version}");
 
         match version {
             0 | SEALED_SENDER_V1_MAJOR_VERSION => {
                 // XXX should we really be accepted version == 0 here?
-                let pb = proto::sealed_sender::UnidentifiedSenderMessage::decode(&data[1..])
+                let pb = proto::sealed_sender::UnidentifiedSenderMessage::decode(remaining)
                     .map_err(|_| SignalProtocolError::InvalidProtobufEncoding)?;
 
                 let ephemeral_public = pb
@@ -572,27 +665,31 @@ impl UnidentifiedSenderMessage {
                 })
             }
             SEALED_SENDER_V2_MAJOR_VERSION => {
-                // Uses a flat representation: C || AT || E.pub || ciphertext
-                let remaining = &data[1..];
-                if remaining.len()
-                    < sealed_sender_v2::MESSAGE_KEY_LEN
-                        + sealed_sender_v2::AUTH_TAG_LEN
-                        + curve::curve25519::PUBLIC_KEY_LENGTH
-                {
-                    return Err(SignalProtocolError::InvalidProtobufEncoding);
+                /// Uses a flat representation: C || AT || E.pub || ciphertext
+                #[derive(FromBytes, Immutable, KnownLayout)]
+                #[repr(C, packed)]
+                struct PrefixRepr {
+                    encrypted_message_key: [u8; sealed_sender_v2::MESSAGE_KEY_LEN],
+                    encrypted_authentication_tag: [u8; sealed_sender_v2::AUTH_TAG_LEN],
+                    ephemeral_public: [u8; sealed_sender_v2::PUBLIC_KEY_LEN],
                 }
-                let (encrypted_message_key, remaining) =
-                    remaining.split_at(sealed_sender_v2::MESSAGE_KEY_LEN);
-                let (encrypted_authentication_tag, remaining) =
-                    remaining.split_at(sealed_sender_v2::AUTH_TAG_LEN);
-                let (ephemeral_public, encrypted_message) =
-                    remaining.split_at(curve::curve25519::PUBLIC_KEY_LENGTH);
+                let (prefix, encrypted_message) =
+                    zerocopy::Ref::<_, PrefixRepr>::from_prefix(remaining)
+                        .map_err(|_| SignalProtocolError::InvalidProtobufEncoding)?;
+
+                let PrefixRepr {
+                    encrypted_message_key,
+                    encrypted_authentication_tag,
+                    ephemeral_public,
+                } = zerocopy::Ref::into_ref(prefix);
 
                 Ok(Self::V2 {
-                    ephemeral_public: PublicKey::from_djb_public_key_bytes(ephemeral_public)?,
-                    encrypted_message_key: encrypted_message_key.into(),
-                    authentication_tag: encrypted_authentication_tag.into(),
-                    encrypted_message: encrypted_message.into(),
+                    ephemeral_public: PublicKey::from_djb_public_key_bytes(
+                        ephemeral_public.as_slice(),
+                    )?,
+                    encrypted_message_key,
+                    authentication_tag: encrypted_authentication_tag,
+                    encrypted_message,
                 })
             }
             _ => Err(SignalProtocolError::UnknownSealedSenderVersion(version)),
@@ -601,10 +698,12 @@ impl UnidentifiedSenderMessage {
 }
 
 mod sealed_sender_v1 {
-    use super::*;
-
     #[cfg(test)]
     use std::fmt;
+
+    use libsignal_core::derive_arrays;
+
+    use super::*;
 
     /// A symmetric cipher key and a MAC key, along with a "chain key" consumed in
     /// [`StaticKeys::calculate`].
@@ -615,7 +714,6 @@ mod sealed_sender_v1 {
     }
 
     const SALT_PREFIX: &[u8] = b"UnidentifiedDelivery";
-    const EPHEMERAL_KEYS_KDF_LEN: usize = 96;
 
     impl EphemeralKeys {
         /// Derive a set of symmetric keys from the key agreement between the sender and
@@ -634,15 +732,16 @@ mod sealed_sender_v1 {
             .concat();
 
             let shared_secret = our_keys.private_key.calculate_agreement(their_public)?;
-            let mut derived_values = [0; EPHEMERAL_KEYS_KDF_LEN];
-            hkdf::Hkdf::<sha2::Sha256>::new(Some(&ephemeral_salt), &shared_secret)
-                .expand(&[], &mut derived_values)
-                .expect("valid output length");
+            let (chain_key, cipher_key, mac_key) = derive_arrays(|bytes| {
+                hkdf::Hkdf::<sha2::Sha256>::new(Some(&ephemeral_salt), &shared_secret)
+                    .expand(&[], bytes)
+                    .expect("valid output length")
+            });
 
             Ok(Self {
-                chain_key: *array_ref![&derived_values, 0, 32],
-                cipher_key: *array_ref![&derived_values, 32, 32],
-                mac_key: *array_ref![&derived_values, 64, 32],
+                chain_key,
+                cipher_key,
+                mac_key,
             })
         }
     }
@@ -691,14 +790,15 @@ mod sealed_sender_v1 {
             // 96 bytes are derived, but the first 32 are discarded/unused. This is intended to
             // mirror the way the EphemeralKeys are derived, even though StaticKeys does not end up
             // requiring a third "chain key".
-            let mut derived_values = [0; 96];
-            hkdf::Hkdf::<sha2::Sha256>::new(Some(&salt), &shared_secret)
-                .expand(&[], &mut derived_values)
-                .expect("valid output length");
+            let (_, cipher_key, mac_key) = derive_arrays::<32, 32, 32>(|bytes| {
+                hkdf::Hkdf::<sha2::Sha256>::new(Some(&salt), &shared_secret)
+                    .expand(&[], bytes)
+                    .expect("valid output length")
+            });
 
             Ok(Self {
-                cipher_key: *array_ref![&derived_values, 32, 32],
-                mac_key: *array_ref![&derived_values, 64, 32],
+                cipher_key,
+                mac_key,
             })
         }
     }
@@ -706,11 +806,11 @@ mod sealed_sender_v1 {
     #[test]
     fn test_agreement_and_authentication() -> Result<()> {
         // The sender and recipient each have a long-term identity key pair.
-        let sender_identity = IdentityKeyPair::generate(&mut rand::thread_rng());
-        let recipient_identity = IdentityKeyPair::generate(&mut rand::thread_rng());
+        let sender_identity = IdentityKeyPair::generate(&mut rand::rng());
+        let recipient_identity = IdentityKeyPair::generate(&mut rand::rng());
 
         // Generate an ephemeral key pair.
-        let sender_ephemeral = KeyPair::generate(&mut rand::thread_rng());
+        let sender_ephemeral = KeyPair::generate(&mut rand::rng());
         let ephemeral_public = sender_ephemeral.public_key;
         // Generate ephemeral cipher, chain, and MAC keys.
         let sender_eph_keys = EphemeralKeys::calculate(
@@ -794,8 +894,16 @@ pub async fn sealed_sender_encrypt<R: Rng + CryptoRng>(
     now: SystemTime,
     rng: &mut R,
 ) -> Result<Vec<u8>> {
-    let message =
-        message_encrypt(ptext, destination, session_store, identity_store, now, None).await?;
+    let message = message_encrypt(
+        ptext,
+        destination,
+        session_store,
+        identity_store,
+        now,
+        None,
+        rng,
+    )
+    .await?;
     let usmc = UnidentifiedSenderMessageContent::new(
         message.0.message_type(),
         sender_cert.clone(),
@@ -914,7 +1022,6 @@ mod sealed_sender_v2 {
 
     // Static byte strings used as part of a MAC in HKDF.
     const LABEL_R: &[u8] = b"Sealed Sender v2: r (2023-08)";
-    const LABEL_R_LEGACY: &[u8] = b"Sealed Sender v2: r";
     const LABEL_K: &[u8] = b"Sealed Sender v2: K";
     const LABEL_DH: &[u8] = b"Sealed Sender v2: DH";
     const LABEL_DH_S: &[u8] = b"Sealed Sender v2: DH-sender";
@@ -923,9 +1030,8 @@ mod sealed_sender_v2 {
     pub const CIPHER_KEY_LEN: usize =
         <Aes256GcmSiv as aes_gcm_siv::aead::KeySizeUser>::KeySize::USIZE;
     pub const AUTH_TAG_LEN: usize = 16;
-
-    // Change this to false after all clients have receive support.
-    pub const USE_LEGACY_EPHEMERAL_KEY_DERIVATION_FOR_ENCRYPT: bool = true;
+    /// SSv2 hardcodes that its keys are Curve25519 public keys.
+    pub const PUBLIC_KEY_LEN: usize = 32;
 
     /// An asymmetric and a symmetric cipher key.
     pub(super) struct DerivedKeys {
@@ -947,17 +1053,6 @@ mod sealed_sender_v2 {
                 .expand(LABEL_R, &mut r)
                 .expect("valid output length");
             let e = PrivateKey::try_from(&r[..]).expect("valid PrivateKey");
-            KeyPair::try_from(e).expect("can derive public key")
-        }
-
-        /// Derive the ephemeral asymmetric keys using the legacy implementation.
-        pub(super) fn derive_e_legacy(&self) -> KeyPair {
-            let mut r = [0; 64];
-            self.kdf
-                .expand(LABEL_R_LEGACY, &mut r)
-                .expect("valid output length");
-            let e_raw = Scalar::from_bytes_mod_order_wide(&r);
-            let e = PrivateKey::try_from(&e_raw.as_bytes()[..]).expect("valid PrivateKey");
             KeyPair::try_from(e).expect("can derive public key")
         }
 
@@ -1051,11 +1146,11 @@ mod sealed_sender_v2 {
     #[test]
     fn test_agreement_and_authentication() -> Result<()> {
         // The sender and recipient each have a long-term identity key pair.
-        let sender_identity = IdentityKeyPair::generate(&mut rand::thread_rng());
-        let recipient_identity = IdentityKeyPair::generate(&mut rand::thread_rng());
+        let sender_identity = IdentityKeyPair::generate(&mut rand::rng());
+        let recipient_identity = IdentityKeyPair::generate(&mut rand::rng());
 
         // Generate random bytes used for our multi-recipient encoding scheme.
-        let m: [u8; MESSAGE_KEY_LEN] = rand::thread_rng().gen();
+        let m: [u8; MESSAGE_KEY_LEN] = rand::rng().random();
         // Derive an ephemeral key pair from those random bytes.
         let ephemeral_keys = DerivedKeys::new(&m);
         let e = ephemeral_keys.derive_e();
@@ -1275,38 +1370,6 @@ where
         usmc,
         identity_store,
         rng,
-        sealed_sender_v2::USE_LEGACY_EPHEMERAL_KEY_DERIVATION_FOR_ENCRYPT,
-    )
-    .await
-}
-
-/// For testing only.
-pub async fn sealed_sender_multi_recipient_encrypt_using_new_ephemeral_key_derivation<
-    R: Rng + CryptoRng,
-    X: IntoIterator<Item = ServiceId>,
->(
-    destinations: &[&ProtocolAddress],
-    destination_sessions: &[&SessionRecord],
-    excluded_recipients: X,
-    usmc: &UnidentifiedSenderMessageContent,
-    identity_store: &dyn IdentityKeyStore,
-    rng: &mut R,
-) -> Result<Vec<u8>>
-where
-    X::IntoIter: ExactSizeIterator,
-{
-    // When this is flipped, we should use this function to test the legacy encryption instead.
-    static_assertions::const_assert!(
-        sealed_sender_v2::USE_LEGACY_EPHEMERAL_KEY_DERIVATION_FOR_ENCRYPT,
-    );
-    sealed_sender_multi_recipient_encrypt_impl(
-        destinations,
-        destination_sessions,
-        excluded_recipients,
-        usmc,
-        identity_store,
-        rng,
-        false,
     )
     .await
 }
@@ -1321,7 +1384,6 @@ async fn sealed_sender_multi_recipient_encrypt_impl<
     usmc: &UnidentifiedSenderMessageContent,
     identity_store: &dyn IdentityKeyStore,
     rng: &mut R,
-    should_use_legacy_ephemeral_key_derivation: bool,
 ) -> Result<Vec<u8>>
 where
     X::IntoIter: ExactSizeIterator,
@@ -1335,13 +1397,9 @@ where
     let excluded_recipients = excluded_recipients.into_iter();
     let our_identity = identity_store.get_identity_key_pair().await?;
 
-    let m: [u8; sealed_sender_v2::MESSAGE_KEY_LEN] = rng.gen();
+    let m: [u8; sealed_sender_v2::MESSAGE_KEY_LEN] = rng.random();
     let keys = sealed_sender_v2::DerivedKeys::new(&m);
-    let e = if should_use_legacy_ephemeral_key_derivation {
-        keys.derive_e_legacy()
-    } else {
-        keys.derive_e()
-    };
+    let e = keys.derive_e();
     let e_pub = &e.public_key;
 
     // Encrypt the shared ciphertext using AES-GCM-SIV.
@@ -1371,7 +1429,7 @@ where
         for (_, mut next_group) in &destinations
             .iter()
             .enumerate()
-            .group_by(|(_i, next)| next.name())
+            .chunk_by(|(_i, next)| next.name())
         {
             let (i, &destination) = next_group
                 .next()
@@ -1384,7 +1442,7 @@ where
                     .get_identity(destination)
                     .await?
                     .ok_or_else(|| {
-                        log::error!("missing identity key for {}", destination);
+                        log::error!("missing identity key for {destination}");
                         // Returned as a SessionNotFound error because (a) we don't have an identity
                         // error that includes the address, and (b) re-establishing the session should
                         // re-fetch the identity.
@@ -1448,14 +1506,8 @@ where
                 their_registration_id |= 0x8000;
             }
 
-            let device_id: u32 = destination.device_id().into();
-            if device_id == 0 || device_id > MAX_VALID_DEVICE_ID {
-                return Err(SignalProtocolError::InvalidState(
-                    "sealed_sender_multi_recipient_encrypt",
-                    format!("destination {destination} has invalid device ID"),
-                ));
-            }
-            serialized.push(device_id.try_into().expect("just checked range"));
+            let device_id = destination.device_id();
+            serialized.push(device_id.into());
             serialized.extend_from_slice(&their_registration_id.to_be_bytes());
         }
 
@@ -1504,10 +1556,7 @@ where
     let parallelism = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1);
-    let chunk_size = std::cmp::max(
-        6,
-        crate::utils::div_ceil(identity_keys_and_ranges.len(), parallelism),
-    );
+    let chunk_size = std::cmp::max(6, identity_keys_and_ranges.len().div_ceil(parallelism));
 
     if parallelism == 1 || chunk_size >= identity_keys_and_ranges.len() {
         process_chunk(&mut serialized, &identity_keys_and_ranges)?;
@@ -1545,7 +1594,7 @@ where
         serialized.push(0);
     }
 
-    serialized.extend_from_slice(e_pub.public_key_bytes()?);
+    serialized.extend_from_slice(e_pub.public_key_bytes());
     serialized.extend_from_slice(&ciphertext);
 
     Ok(serialized)
@@ -1598,13 +1647,11 @@ impl<'a> SealedSenderV2SentMessage<'a> {
         }
 
         fn advance<'a, const N: usize>(buf: &mut &'a [u8]) -> Result<&'a [u8; N]> {
-            if N > buf.len() {
-                return Err(SignalProtocolError::InvalidProtobufEncoding);
-            }
-            // TODO: Replace with split_array_ref or split_first_chunk when stabilized.
-            let (prefix, remaining) = buf.split_at(N);
+            let (prefix, remaining) = buf
+                .split_first_chunk()
+                .ok_or(SignalProtocolError::InvalidProtobufEncoding)?;
             *buf = remaining;
-            Ok(prefix.try_into().expect("checked length"))
+            Ok(prefix)
         }
         fn decode_varint(buf: &mut &[u8]) -> Result<u32> {
             let result: usize = prost::decode_length_delimiter(*buf)
@@ -1641,20 +1688,19 @@ impl<'a> SealedSenderV2SentMessage<'a> {
             };
             let mut devices = Vec::new();
             loop {
-                let device_id: u32 = advance::<1>(&mut remaining)?[0].into();
+                let device_id = advance::<1>(&mut remaining)?[0];
                 if device_id == 0 {
                     if !devices.is_empty() {
                         return Err(SignalProtocolError::InvalidProtobufEncoding);
                     }
                     break;
                 }
-                if device_id > MAX_VALID_DEVICE_ID {
-                    return Err(SignalProtocolError::InvalidProtobufEncoding);
-                }
+                let device_id = DeviceId::new(device_id)
+                    .map_err(|_| SignalProtocolError::InvalidProtobufEncoding)?;
                 let registration_id_and_has_more =
                     u16::from_be_bytes(*advance::<2>(&mut remaining)?);
                 devices.push((
-                    device_id.into(),
+                    device_id,
                     registration_id_and_has_more & VALID_REGISTRATION_ID_MASK,
                 ));
                 let has_more = (registration_id_and_has_more & 0x8000) != 0;
@@ -1691,7 +1737,7 @@ impl<'a> SealedSenderV2SentMessage<'a> {
             };
         }
 
-        if remaining.len() < curve::curve25519::PUBLIC_KEY_LENGTH {
+        if remaining.len() < sealed_sender_v2::PUBLIC_KEY_LEN {
             return Err(SignalProtocolError::InvalidProtobufEncoding);
         }
 
@@ -1819,7 +1865,7 @@ pub async fn sealed_sender_decrypt_to_usmc(
                     unreachable!("just derived these keys; they should be valid");
                 }
                 Err(crypto::DecryptionError::BadCiphertext(msg)) => {
-                    log::error!("failed to decrypt sealed sender v1 message key: {}", msg);
+                    log::error!("failed to decrypt sealed sender v1 message key: {msg}");
                     return Err(SignalProtocolError::InvalidSealedSenderMessage(
                         "failed to decrypt sealed sender v1 message key".to_owned(),
                     ));
@@ -1845,10 +1891,7 @@ pub async fn sealed_sender_decrypt_to_usmc(
                     unreachable!("just derived these keys; they should be valid");
                 }
                 Err(crypto::DecryptionError::BadCiphertext(msg)) => {
-                    log::error!(
-                        "failed to decrypt sealed sender v1 message contents: {}",
-                        msg
-                    );
+                    log::error!("failed to decrypt sealed sender v1 message contents: {msg}");
                     return Err(SignalProtocolError::InvalidSealedSenderMessage(
                         "failed to decrypt sealed sender v1 message contents".to_owned(),
                     ));
@@ -1871,40 +1914,21 @@ pub async fn sealed_sender_decrypt_to_usmc(
             authentication_tag,
             encrypted_message,
         } => {
-            let encrypted_message_key: [u8; sealed_sender_v2::MESSAGE_KEY_LEN] =
-                encrypted_message_key.as_ref().try_into().map_err(|_| {
-                    SignalProtocolError::InvalidSealedSenderMessage(format!(
-                        "encrypted message key had incorrect length {} (should be {})",
-                        encrypted_message_key.len(),
-                        sealed_sender_v2::MESSAGE_KEY_LEN
-                    ))
-                })?;
             let m = sealed_sender_v2::apply_agreement_xor(
                 &our_identity.into(),
                 &ephemeral_public,
                 Direction::Receiving,
-                &encrypted_message_key,
+                encrypted_message_key,
             )?;
 
             let keys = sealed_sender_v2::DerivedKeys::new(&m);
-            // It is okay that this is not constant time; the only information revealed is whether
-            // the sender is using the new or old derivation for the ephemeral key, combined with
-            // which key the receiver tried first.
-            let mut derive_first_key: fn(_) -> _ = sealed_sender_v2::DerivedKeys::derive_e;
-            let mut derive_second_key: fn(_) -> _ = sealed_sender_v2::DerivedKeys::derive_e_legacy;
-            if sealed_sender_v2::USE_LEGACY_EPHEMERAL_KEY_DERIVATION_FOR_ENCRYPT {
-                std::mem::swap(&mut derive_first_key, &mut derive_second_key);
-            }
-
-            if !bool::from(derive_first_key(&keys).public_key.ct_eq(&ephemeral_public))
-                && !bool::from(derive_second_key(&keys).public_key.ct_eq(&ephemeral_public))
-            {
+            if !bool::from(keys.derive_e().public_key.ct_eq(&ephemeral_public)) {
                 return Err(SignalProtocolError::InvalidSealedSenderMessage(
                     "derived ephemeral key did not match key provided in message".to_string(),
                 ));
             }
 
-            let mut message_bytes = encrypted_message.into_vec();
+            let mut message_bytes = Vec::from(encrypted_message);
             Aes256GcmSiv::new(&keys.derive_k().into())
                 .decrypt_in_place(
                     // There's no nonce because the key is already one-use.
@@ -1915,8 +1939,7 @@ pub async fn sealed_sender_decrypt_to_usmc(
                 )
                 .map_err(|err| {
                     SignalProtocolError::InvalidSealedSenderMessage(format!(
-                        "failed to decrypt inner message: {}",
-                        err
+                        "failed to decrypt inner message: {err}"
                     ))
                 })?;
 
@@ -1927,7 +1950,7 @@ pub async fn sealed_sender_decrypt_to_usmc(
                 &usmc.sender()?.key()?.into(),
                 Direction::Receiving,
                 &ephemeral_public,
-                &encrypted_message_key,
+                encrypted_message_key,
             )?;
             if !bool::from(authentication_tag.ct_eq(&at)) {
                 return Err(SignalProtocolError::InvalidSealedSenderMessage(
@@ -1973,11 +1996,11 @@ impl SealedSenderDecryptionResult {
 /// the embedded [`SenderCertificate`]. The sender certificate (signed by the [`ServerCertificate`])
 /// is then validated against the `trust_root` baked into the client to ensure that the sender's
 /// identity was not forged.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn sealed_sender_decrypt(
     ciphertext: &[u8],
     trust_root: &PublicKey,
-    timestamp: u64,
+    timestamp: Timestamp,
     local_e164: Option<String>,
     local_uuid: String,
     local_device_id: DeviceId,
@@ -2007,7 +2030,7 @@ pub async fn sealed_sender_decrypt(
         return Err(SignalProtocolError::SealedSenderSelfSend);
     }
 
-    let mut rng = rand::rngs::OsRng;
+    let mut rng = rand::rngs::OsRng.unwrap_err();
 
     let remote_address = ProtocolAddress::new(
         usmc.sender()?.sender_uuid()?.to_string(),
@@ -2081,7 +2104,7 @@ fn test_lossless_round_trip() -> Result<()> {
     //
     // Step 3: Serialize and print out the new fixture data (uncomment the following)
     //
-    // let mut rng = rand::rngs::OsRng;
+    // let mut rng = rand::rngs::OsRng.unwrap_err();
     // let server_key = KeyPair::generate(&mut rng);
     // let sender_key = KeyPair::generate(&mut rng);
     //
@@ -2089,39 +2112,168 @@ fn test_lossless_round_trip() -> Result<()> {
     //     ServerCertificate::new(1, server_key.public_key, &trust_root, &mut rng)?;
     //
     // let sender_cert = proto::sealed_sender::sender_certificate::Certificate {
-    //     sender_uuid: Some("aaaaaaaa-7000-11eb-b32a-33b8a8a487a6".to_string()),
+    //     sender_uuid: Some(
+    //         proto::sealed_sender::sender_certificate::certificate::SenderUuid::UuidString(
+    //             "aaaaaaaa-7000-11eb-b32a-33b8a8a487a6".to_string(),
+    //         ),
+    //     ),
     //     sender_e164: None,
     //     sender_device: Some(1),
     //     expires: Some(31337),
     //     identity_key: Some(sender_key.public_key.serialize().to_vec()),
-    //     signer: Some(server_cert.to_protobuf()?),
+    //     signer: Some(
+    //         proto::sealed_sender::sender_certificate::certificate::Signer::Certificate(
+    //             server_cert.serialized()?.to_vec(),
+    //         ),
+    //     ),
     //     some_fake_field: Some("crashing right down".to_string()),
     // };
     //
     // eprintln!("<SNIP>");
     // let serialized_certificate_data = sender_cert.encode_to_vec();
     // let certificate_data_encoded = hex::encode(&serialized_certificate_data);
-    // eprintln!("let certificate_data_encoded = \"{}\";", certificate_data_encoded);
+    // eprintln!("let certificate_data = const_str::hex!(\"{}\");", certificate_data_encoded);
     //
     // let certificate_signature = server_key.calculate_signature(&serialized_certificate_data, &mut rng)?;
     // let certificate_signature_encoded = hex::encode(certificate_signature);
-    // eprintln!("let certificate_signature_encoded = \"{}\";", certificate_signature_encoded);
+    // eprintln!("let certificate_signature = const_str::hex!(\"{}\");", certificate_signature_encoded);
 
-    // Step 4: update the following *_encoded fixture data with the new values from above.
-    let certificate_data_encoded = "100119697a0000000000002221056c9d1f8deb82b9a898f9c277a1b74989ec009afb5c0acb5e8e69e3d5ca29d6322a690a2508011221053b03ca070e6f6b2f271d32f27321689cdf4e59b106c10b58fbe15063ed868a5a124024bc92954e52ad1a105b5bda85c9db410dcfeb42a671b45a523b3a46e9594a8bde0efc671d8e8e046b32c67f59b80a46ffdf24071850779bc21325107902af89322461616161616161612d373030302d313165622d623332612d333362386138613438376136ba3e136372617368696e6720726967687420646f776e";
-    let certificate_signature_encoded = "a22d8f86f5d00794f319add821e342c6ffffb6b34f741e569f8b321ab0255f2d1757ecf648e53a3602cae8f09b3fc80dcf27534d67efd272b6739afc31f75c8c";
-
-    // The rest of the test should be stable.
-    let certificate_data = hex::decode(certificate_data_encoded).expect("valid hex");
-    let certificate_signature = hex::decode(certificate_signature_encoded).expect("valid hex");
+    // Step 4: update the following fixture data with the new values from above.
+    let certificate_data = const_str::hex!(
+        "100119697a0000000000002221056c9d1f8deb82b9a898f9c277a1b74989ec009afb5c0acb5e8e69e3d5ca29d6322a690a2508011221053b03ca070e6f6b2f271d32f27321689cdf4e59b106c10b58fbe15063ed868a5a124024bc92954e52ad1a105b5bda85c9db410dcfeb42a671b45a523b3a46e9594a8bde0efc671d8e8e046b32c67f59b80a46ffdf24071850779bc21325107902af89322461616161616161612d373030302d313165622d623332612d333362386138613438376136ba3e136372617368696e6720726967687420646f776e"
+    );
+    let certificate_signature = const_str::hex!(
+        "a22d8f86f5d00794f319add821e342c6ffffb6b34f741e569f8b321ab0255f2d1757ecf648e53a3602cae8f09b3fc80dcf27534d67efd272b6739afc31f75c8c"
+    );
 
     let sender_certificate_data = proto::sealed_sender::SenderCertificate {
-        certificate: Some(certificate_data),
-        signature: Some(certificate_signature),
+        certificate: Some(certificate_data.to_vec()),
+        signature: Some(certificate_signature.to_vec()),
     };
 
     let sender_certificate =
         SenderCertificate::deserialize(&sender_certificate_data.encode_to_vec())?;
-    assert!(sender_certificate.validate(&trust_root.public_key()?, 31336)?);
+    assert_eq!(
+        sender_certificate.sender_uuid().expect("valid"),
+        "aaaaaaaa-7000-11eb-b32a-33b8a8a487a6",
+    );
+    assert_eq!(sender_certificate.sender_e164().expect("valid"), None);
+    assert_eq!(
+        sender_certificate.sender_device_id().expect("valid"),
+        DeviceId::new(1).expect("valid"),
+    );
+    assert_eq!(
+        sender_certificate
+            .expiration()
+            .expect("valid")
+            .epoch_millis(),
+        31337
+    );
+    assert!(sender_certificate.validate(
+        &trust_root.public_key()?,
+        Timestamp::from_epoch_millis(31336)
+    )?);
     Ok(())
+}
+
+#[test]
+fn test_uuid_bytes_representation() -> Result<()> {
+    let trust_root = PrivateKey::deserialize(&[0u8; 32])?;
+
+    // Same structure as above, but using the uuidBytes representation instead of uuidString.
+    let certificate_data = const_str::hex!(
+        "100119697a000000000000222105e083a8ce423d1c1955174107a85a6a7f3bcbf566723624077f75eafe8e0a07752a690a25080112210507a24397ae27d06fa76d2f02cfb5546e0b23a7e0c3670c1eb1e73b135a8e1e4d12407d127509ae1f5e9dcaa511793d3e94350dcb269e4ca54500da6e1f4dc13d95940c15badef019edfe8666315500c54e4489d4b83f6ce79c7f65c9772a1a83d88c3a10aaaaaaaa700011ebb32a33b8a8a487a6"
+    );
+    let certificate_signature = const_str::hex!(
+        "755c428e9bf6ba367152f1e545834649b4e8f70df8383a352a953fdb774862af5d42fab573fc52b90ad47c331c36f93b1a4fa7a2504917d895452ffe7f44bd0e"
+    );
+
+    let sender_certificate_data = proto::sealed_sender::SenderCertificate {
+        certificate: Some(certificate_data.to_vec()),
+        signature: Some(certificate_signature.to_vec()),
+    };
+
+    let sender_certificate =
+        SenderCertificate::deserialize(&sender_certificate_data.encode_to_vec())?;
+    assert_eq!(
+        sender_certificate.sender_uuid().expect("valid"),
+        "aaaaaaaa-7000-11eb-b32a-33b8a8a487a6",
+    );
+    assert_eq!(sender_certificate.sender_e164().expect("valid"), None);
+    assert_eq!(
+        sender_certificate.sender_device_id().expect("valid"),
+        DeviceId::new(1).expect("valid"),
+    );
+    assert_eq!(
+        sender_certificate
+            .expiration()
+            .expect("valid")
+            .epoch_millis(),
+        31337
+    );
+    assert!(sender_certificate.validate(
+        &trust_root.public_key()?,
+        Timestamp::from_epoch_millis(31336)
+    )?);
+    Ok(())
+}
+
+#[test]
+fn test_known_server_cert() -> Result<()> {
+    // Same structure as test_lossless_round_trip, but using the fixed server key from the 7357c357
+    // certificate, and a reference to it rather than embedding it.
+    //
+    // % pbpaste | xxd -r -p | protoscope
+    // 2: 1
+    // 3: 31337i64
+    // 4: {`05d75b13e15c7700079dd226f51e5a790ba395e819e88a74d0cf5cedfad8b43348`}
+    // 8: 1935131479
+    // 6: {"aaaaaaaa-7000-11eb-b32a-33b8a8a487a6"}
+
+    let trust_root = PrivateKey::deserialize(&[0u8; 32])?;
+    // let server_key = PrivateKey::deserialize(&[0xff; 32])?;
+
+    let certificate_data = const_str::hex!(
+        "100119697a000000000000222105d75b13e15c7700079dd226f51e5a790ba395e819e88a74d0cf5cedfad8b4334840d786df9a07322461616161616161612d373030302d313165622d623332612d333362386138613438376136"
+    );
+    let certificate_signature = const_str::hex!(
+        "e62667bce627caed56ca2ab309b6ae7bc890a30a7482c0e1fd77ec9c3b7528abfd45c8c42b240509a71d973ef5e0f1dbd2685fe01410f0fdbaa8fb247a67e08f"
+    );
+
+    let sender_certificate_data = proto::sealed_sender::SenderCertificate {
+        certificate: Some(certificate_data.to_vec()),
+        signature: Some(certificate_signature.to_vec()),
+    };
+
+    let sender_certificate =
+        SenderCertificate::deserialize(&sender_certificate_data.encode_to_vec())?;
+    assert!(sender_certificate.validate(
+        &trust_root.public_key()?,
+        Timestamp::from_epoch_millis(31336)
+    )?);
+
+    Ok(())
+}
+
+#[test]
+fn verify_known_certificates() {
+    assert!(
+        KNOWN_SERVER_CERTIFICATES
+            .iter()
+            .map(|(id, _trust_root, _cert)| id)
+            .all_unique(),
+        "all known certificate IDs must be unique"
+    );
+
+    for (id, trust_root, cert) in KNOWN_SERVER_CERTIFICATES {
+        let trust_root = PublicKey::deserialize(trust_root)
+            .unwrap_or_else(|e| panic!("[{id:x}] has invalid trust root: {e}"));
+        let cert = ServerCertificate::deserialize(cert)
+            .unwrap_or_else(|e| panic!("[{id:x}] has invalid certificate data: {e}"));
+        assert_eq!(*id, cert.key_id, "[{id:x}] mismatched certificate ID");
+        assert!(
+            cert.validate(&trust_root).expect("can validate"),
+            "[{id:x}] has wrong trust root"
+        );
+    }
 }

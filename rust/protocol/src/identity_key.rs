@@ -3,15 +3,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-//! Wrappers over cryptographic primitives from [`crate::curve`] to represent a user.
+//! Wrappers over cryptographic primitives from [`libsignal_core::curve`] to represent a user.
 
 #![warn(missing_docs)]
 
-use crate::{proto, KeyPair, PrivateKey, PublicKey, Result, SignalProtocolError};
-
+use prost::Message;
 use rand::{CryptoRng, Rng};
 
-use prost::Message;
+use crate::{KeyPair, PrivateKey, PublicKey, Result, SignalProtocolError, proto};
 
 // Used for domain separation between alternate-identity signatures and other key-to-key signatures.
 const ALTERNATE_IDENTITY_SIGNATURE_PREFIX_1: &[u8] = &[0xFF; 32];
@@ -20,7 +19,9 @@ const ALTERNATE_IDENTITY_SIGNATURE_PREFIX_2: &[u8] = b"Signal_PNI_Signature";
 /// A public key that represents the identity of a user.
 ///
 /// Wrapper for [`PublicKey`].
-#[derive(Debug, PartialOrd, Ord, PartialEq, Eq, Clone, Copy)]
+#[derive(
+    Debug, PartialOrd, Ord, PartialEq, Eq, Clone, Copy, derive_more::From, derive_more::Into,
+)]
 pub struct IdentityKey {
     public_key: PublicKey,
 }
@@ -54,14 +55,14 @@ impl IdentityKey {
     ///
     /// `signature` must be calculated from [`IdentityKeyPair::sign_alternate_identity`].
     pub fn verify_alternate_identity(&self, other: &IdentityKey, signature: &[u8]) -> Result<bool> {
-        self.public_key.verify_signature_for_multipart_message(
+        Ok(self.public_key.verify_signature_for_multipart_message(
             &[
                 ALTERNATE_IDENTITY_SIGNATURE_PREFIX_1,
                 ALTERNATE_IDENTITY_SIGNATURE_PREFIX_2,
                 &other.serialize(),
             ],
             signature,
-        )
+        ))
     }
 }
 
@@ -70,18 +71,6 @@ impl TryFrom<&[u8]> for IdentityKey {
 
     fn try_from(value: &[u8]) -> Result<Self> {
         IdentityKey::decode(value)
-    }
-}
-
-impl From<PublicKey> for IdentityKey {
-    fn from(value: PublicKey) -> Self {
-        Self { public_key: value }
-    }
-}
-
-impl From<IdentityKey> for PublicKey {
-    fn from(value: IdentityKey) -> Self {
-        value.public_key
     }
 }
 
@@ -148,14 +137,14 @@ impl IdentityKeyPair {
         other: &IdentityKey,
         rng: &mut R,
     ) -> Result<Box<[u8]>> {
-        self.private_key.calculate_signature_for_multipart_message(
+        Ok(self.private_key.calculate_signature_for_multipart_message(
             &[
                 ALTERNATE_IDENTITY_SIGNATURE_PREFIX_1,
                 ALTERNATE_IDENTITY_SIGNATURE_PREFIX_2,
                 &other.serialize(),
             ],
             rng,
-        )
+        )?)
     }
 }
 
@@ -198,13 +187,14 @@ impl From<IdentityKeyPair> for KeyPair {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
+    use rand::TryRngCore as _;
     use rand::rngs::OsRng;
+
+    use super::*;
 
     #[test]
     fn test_identity_key_from() {
-        let key_pair = KeyPair::generate(&mut OsRng);
+        let key_pair = KeyPair::generate(&mut OsRng.unwrap_err());
         let key_pair_public_serialized = key_pair.public_key.serialize();
         let identity_key = IdentityKey::from(key_pair.public_key);
         assert_eq!(key_pair_public_serialized, identity_key.serialize());
@@ -212,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_serialize_identity_key_pair() -> Result<()> {
-        let identity_key_pair = IdentityKeyPair::generate(&mut OsRng);
+        let identity_key_pair = IdentityKeyPair::generate(&mut OsRng.unwrap_err());
         let serialized = identity_key_pair.serialize();
         let deserialized_identity_key_pair = IdentityKeyPair::try_from(&serialized[..])?;
         assert_eq!(
@@ -233,32 +223,43 @@ mod tests {
 
     #[test]
     fn test_alternate_identity_signing() -> Result<()> {
-        let primary = IdentityKeyPair::generate(&mut OsRng);
-        let secondary = IdentityKeyPair::generate(&mut OsRng);
+        let mut rng = OsRng.unwrap_err();
+        let primary = IdentityKeyPair::generate(&mut rng);
+        let secondary = IdentityKeyPair::generate(&mut rng);
 
-        let signature = secondary.sign_alternate_identity(primary.identity_key(), &mut OsRng)?;
-        assert!(secondary
-            .identity_key()
-            .verify_alternate_identity(primary.identity_key(), &signature)?);
+        let signature = secondary.sign_alternate_identity(primary.identity_key(), &mut rng)?;
+        assert!(
+            secondary
+                .identity_key()
+                .verify_alternate_identity(primary.identity_key(), &signature)?
+        );
         // Not symmetric.
-        assert!(!primary
-            .identity_key()
-            .verify_alternate_identity(secondary.identity_key(), &signature)?);
+        assert!(
+            !primary
+                .identity_key()
+                .verify_alternate_identity(secondary.identity_key(), &signature)?
+        );
 
         let another_signature =
-            secondary.sign_alternate_identity(primary.identity_key(), &mut OsRng)?;
+            secondary.sign_alternate_identity(primary.identity_key(), &mut rng)?;
         assert_ne!(signature, another_signature);
-        assert!(secondary
-            .identity_key()
-            .verify_alternate_identity(primary.identity_key(), &another_signature)?);
+        assert!(
+            secondary
+                .identity_key()
+                .verify_alternate_identity(primary.identity_key(), &another_signature)?
+        );
 
-        let unrelated = IdentityKeyPair::generate(&mut OsRng);
-        assert!(!secondary
-            .identity_key()
-            .verify_alternate_identity(unrelated.identity_key(), &signature)?);
-        assert!(!unrelated
-            .identity_key()
-            .verify_alternate_identity(primary.identity_key(), &signature)?);
+        let unrelated = IdentityKeyPair::generate(&mut rng);
+        assert!(
+            !secondary
+                .identity_key()
+                .verify_alternate_identity(unrelated.identity_key(), &signature)?
+        );
+        assert!(
+            !unrelated
+                .identity_key()
+                .verify_alternate_identity(primary.identity_key(), &signature)?
+        );
 
         Ok(())
     }

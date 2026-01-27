@@ -3,19 +3,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+#![deny(unsafe_code)]
+#![warn(clippy::unwrap_used)]
+
 pub mod cds2;
 pub mod client_connection;
 pub mod constants;
 pub mod dcap;
 pub mod enclave;
 pub mod hsm_enclave;
-pub mod ias;
-pub mod nitro;
 pub mod sgx_session;
+pub mod snow_resolver;
 pub mod svr2;
 
+mod cert_chain;
 mod endian;
 mod error;
+mod expireable;
 mod proto;
-mod snow_resolver;
 mod util;

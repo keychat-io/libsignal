@@ -26,74 +26,26 @@ public class ServerZkAuthOperations {
     this.serverSecretParams = serverSecretParams;
   }
 
-  public AuthCredentialResponse issueAuthCredential(Aci aci, int redemptionTime) {
-    return issueAuthCredential(new SecureRandom(), aci, redemptionTime);
-  }
-
-  public AuthCredentialResponse issueAuthCredential(
-      SecureRandom secureRandom, Aci aci, int redemptionTime) {
-    byte[] random = new byte[RANDOM_LENGTH];
-
-    secureRandom.nextBytes(random);
-
-    byte[] newContents =
-        Native.ServerSecretParams_IssueAuthCredentialDeterministic(
-            serverSecretParams.getInternalContentsForJNI(),
-            random,
-            aci.toServiceIdFixedWidthBinary(),
-            redemptionTime);
-
-    try {
-      return new AuthCredentialResponse(newContents);
-    } catch (InvalidInputException e) {
-      throw new AssertionError(e);
-    }
-  }
-
-  public AuthCredentialWithPniResponse issueAuthCredentialWithPniAsServiceId(
+  public AuthCredentialWithPniResponse issueAuthCredentialWithPniZkc(
       Aci aci, Pni pni, Instant redemptionTime) {
-    return issueAuthCredentialWithPniAsServiceId(new SecureRandom(), aci, pni, redemptionTime);
+    return issueAuthCredentialWithPniZkc(new SecureRandom(), aci, pni, redemptionTime);
   }
 
-  public AuthCredentialWithPniResponse issueAuthCredentialWithPniAsServiceId(
+  public AuthCredentialWithPniResponse issueAuthCredentialWithPniZkc(
       SecureRandom secureRandom, Aci aci, Pni pni, Instant redemptionTime) {
     byte[] random = new byte[RANDOM_LENGTH];
 
     secureRandom.nextBytes(random);
 
     byte[] newContents =
-        Native.ServerSecretParams_IssueAuthCredentialWithPniAsServiceIdDeterministic(
-            serverSecretParams.getInternalContentsForJNI(),
-            random,
-            aci.toServiceIdFixedWidthBinary(),
-            pni.toServiceIdFixedWidthBinary(),
-            redemptionTime.getEpochSecond());
-
-    try {
-      return new AuthCredentialWithPniResponse(newContents);
-    } catch (InvalidInputException e) {
-      throw new AssertionError(e);
-    }
-  }
-
-  public AuthCredentialWithPniResponse issueAuthCredentialWithPniAsAci(
-      Aci aci, Pni pni, Instant redemptionTime) {
-    return issueAuthCredentialWithPniAsAci(new SecureRandom(), aci, pni, redemptionTime);
-  }
-
-  public AuthCredentialWithPniResponse issueAuthCredentialWithPniAsAci(
-      SecureRandom secureRandom, Aci aci, Pni pni, Instant redemptionTime) {
-    byte[] random = new byte[RANDOM_LENGTH];
-
-    secureRandom.nextBytes(random);
-
-    byte[] newContents =
-        Native.ServerSecretParams_IssueAuthCredentialWithPniAsAciDeterministic(
-            serverSecretParams.getInternalContentsForJNI(),
-            random,
-            aci.toServiceIdFixedWidthBinary(),
-            pni.toServiceIdFixedWidthBinary(),
-            redemptionTime.getEpochSecond());
+        serverSecretParams.guardedMap(
+            (serverSecretParams) ->
+                Native.ServerSecretParams_IssueAuthCredentialWithPniZkcDeterministic(
+                    serverSecretParams,
+                    random,
+                    aci.toServiceIdFixedWidthBinary(),
+                    pni.toServiceIdFixedWidthBinary(),
+                    redemptionTime.getEpochSecond()));
 
     try {
       return new AuthCredentialWithPniResponse(newContents);
@@ -116,10 +68,12 @@ public class ServerZkAuthOperations {
     filterExceptions(
         VerificationFailedException.class,
         () ->
-            Native.ServerSecretParams_VerifyAuthCredentialPresentation(
-                serverSecretParams.getInternalContentsForJNI(),
-                groupPublicParams.getInternalContentsForJNI(),
-                authCredentialPresentation.getInternalContentsForJNI(),
-                currentTime.getEpochSecond()));
+            serverSecretParams.guardedRunChecked(
+                (secretParams) ->
+                    Native.ServerSecretParams_VerifyAuthCredentialPresentation(
+                        secretParams,
+                        groupPublicParams.getInternalContentsForJNI(),
+                        authCredentialPresentation.getInternalContentsForJNI(),
+                        currentTime.getEpochSecond())));
   }
 }

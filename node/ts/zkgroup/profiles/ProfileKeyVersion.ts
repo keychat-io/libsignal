@@ -3,20 +3,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import ByteArray from '../internal/ByteArray';
+import ByteArray from '../internal/ByteArray.js';
 
 export default class ProfileKeyVersion extends ByteArray {
   private readonly __type?: never;
   static SIZE = 64;
 
-  constructor(contents: Buffer | string) {
+  constructor(contents: Uint8Array | string) {
     super(
-      typeof contents === 'string' ? Buffer.from(contents) : contents,
+      typeof contents === 'string'
+        ? new TextEncoder().encode(contents)
+        : contents,
       ProfileKeyVersion.checkLength(ProfileKeyVersion.SIZE)
     );
   }
 
   toString(): string {
-    return this.contents.toString('utf8');
+    return new TextDecoder().decode(this.contents);
   }
 }

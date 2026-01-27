@@ -31,7 +31,6 @@ import org.signal.libsignal.protocol.SessionBuilder;
 import org.signal.libsignal.protocol.SessionCipher;
 import org.signal.libsignal.protocol.SignalProtocolAddress;
 import org.signal.libsignal.protocol.UntrustedIdentityException;
-import org.signal.libsignal.protocol.ecc.Curve;
 import org.signal.libsignal.protocol.ecc.ECKeyPair;
 import org.signal.libsignal.protocol.ecc.ECPublicKey;
 import org.signal.libsignal.protocol.groups.GroupCipher;
@@ -53,10 +52,9 @@ public class SealedSessionCipherTest extends TestCase {
 
   private static SignedPreKeyRecord generateSignedPreKey(
       IdentityKeyPair identityKeyPair, int signedPreKeyId) throws InvalidKeyException {
-    ECKeyPair keyPair = Curve.generateKeyPair();
+    ECKeyPair keyPair = ECKeyPair.generate();
     byte[] signature =
-        Curve.calculateSignature(
-            identityKeyPair.getPrivateKey(), keyPair.getPublicKey().serialize());
+        identityKeyPair.getPrivateKey().calculateSignature(keyPair.getPublicKey().serialize());
 
     return new SignedPreKeyRecord(signedPreKeyId, System.currentTimeMillis(), keyPair, signature);
   }
@@ -65,8 +63,7 @@ public class SealedSessionCipherTest extends TestCase {
       IdentityKeyPair identityKeyPair, int kyberPreKeyId) throws InvalidKeyException {
     KEMKeyPair keyPair = KEMKeyPair.generate(KEMKeyType.KYBER_1024);
     byte[] signature =
-        Curve.calculateSignature(
-            identityKeyPair.getPrivateKey(), keyPair.getPublicKey().serialize());
+        identityKeyPair.getPrivateKey().calculateSignature(keyPair.getPublicKey().serialize());
 
     return new KyberPreKeyRecord(kyberPreKeyId, System.currentTimeMillis(), keyPair, signature);
   }
@@ -92,7 +89,7 @@ public class SealedSessionCipherTest extends TestCase {
 
     initializeSessions(aliceStore, bobStore, bobAddress);
 
-    ECKeyPair trustRoot = Curve.generateKeyPair();
+    ECKeyPair trustRoot = ECKeyPair.generate();
     SenderCertificate senderCertificate =
         createCertificateFor(
             trustRoot,
@@ -121,6 +118,23 @@ public class SealedSessionCipherTest extends TestCase {
         plaintext.getSenderAci().toServiceIdString(), "9d0652a3-dcc3-4d11-975f-74d61598733f");
     assertEquals(plaintext.getSenderE164().get(), "+14151111111");
     assertEquals(plaintext.getDeviceId(), 1);
+
+    ECPublicKey randomPublicKey1 = ECKeyPair.generate().getPublicKey();
+    ECPublicKey randomPublicKey2 = ECKeyPair.generate().getPublicKey();
+    ECPublicKey randomPublicKey3 = ECKeyPair.generate().getPublicKey();
+    CertificateValidator validatorWithCorrectRoot =
+        new CertificateValidator(
+            Arrays.asList(randomPublicKey1, trustRoot.getPublicKey(), randomPublicKey2));
+    validatorWithCorrectRoot.validate(senderCertificate, 31335);
+
+    CertificateValidator validatorWithoutCorrectRoot =
+        new CertificateValidator(Arrays.asList(randomPublicKey1, randomPublicKey3));
+    try {
+      validatorWithoutCorrectRoot.validate(senderCertificate, 31335);
+      fail("Should have thrown InvalidCertificateException");
+    } catch (InvalidCertificateException e) {
+      // Expected
+    }
   }
 
   public void testEncryptDecryptUntrusted() throws Exception {
@@ -130,8 +144,8 @@ public class SealedSessionCipherTest extends TestCase {
 
     initializeSessions(aliceStore, bobStore, bobAddress);
 
-    ECKeyPair trustRoot = Curve.generateKeyPair();
-    ECKeyPair falseTrustRoot = Curve.generateKeyPair();
+    ECKeyPair trustRoot = ECKeyPair.generate();
+    ECKeyPair falseTrustRoot = ECKeyPair.generate();
     SenderCertificate senderCertificate =
         createCertificateFor(
             falseTrustRoot,
@@ -167,7 +181,7 @@ public class SealedSessionCipherTest extends TestCase {
 
     initializeSessions(aliceStore, bobStore, bobAddress);
 
-    ECKeyPair trustRoot = Curve.generateKeyPair();
+    ECKeyPair trustRoot = ECKeyPair.generate();
     SenderCertificate senderCertificate =
         createCertificateFor(
             trustRoot,
@@ -203,8 +217,8 @@ public class SealedSessionCipherTest extends TestCase {
 
     initializeSessions(aliceStore, bobStore, bobAddress);
 
-    ECKeyPair trustRoot = Curve.generateKeyPair();
-    ECKeyPair randomKeyPair = Curve.generateKeyPair();
+    ECKeyPair trustRoot = ECKeyPair.generate();
+    ECKeyPair randomKeyPair = ECKeyPair.generate();
     SenderCertificate senderCertificate =
         createCertificateFor(
             trustRoot,
@@ -258,7 +272,7 @@ public class SealedSessionCipherTest extends TestCase {
 
     initializeSessions(aliceStore, bobStore, bobAddress);
 
-    ECKeyPair trustRoot = Curve.generateKeyPair();
+    ECKeyPair trustRoot = ECKeyPair.generate();
     SenderCertificate senderCertificate =
         createCertificateFor(
             trustRoot,
@@ -339,7 +353,7 @@ public class SealedSessionCipherTest extends TestCase {
     SignalProtocolAddress bobAddress =
         new SignalProtocolAddress("e80f7bbe-5b94-471e-bd8c-2173654ea3d1", 1);
 
-    ECKeyPair bobPreKey = Curve.generateKeyPair();
+    ECKeyPair bobPreKey = ECKeyPair.generate();
     IdentityKeyPair bobIdentityKey = bobStore.getIdentityKeyPair();
     SignedPreKeyRecord bobSignedPreKey = generateSignedPreKey(bobIdentityKey, 2);
     KyberPreKeyRecord bobKyberPreKey = generateKyberPreKey(bobIdentityKey, 12);
@@ -360,7 +374,7 @@ public class SealedSessionCipherTest extends TestCase {
     SessionBuilder aliceSessionBuilder = new SessionBuilder(aliceStore, bobAddress);
     aliceSessionBuilder.process(bobBundle);
 
-    ECKeyPair trustRoot = Curve.generateKeyPair();
+    ECKeyPair trustRoot = ECKeyPair.generate();
     SenderCertificate senderCertificate =
         createCertificateFor(
             trustRoot,
@@ -428,7 +442,7 @@ public class SealedSessionCipherTest extends TestCase {
     SignalProtocolAddress carolAddress =
         new SignalProtocolAddress("38381c3b-2606-4ca7-9310-7cb927f2ab4a", 1);
 
-    ECKeyPair bobPreKey = Curve.generateKeyPair();
+    ECKeyPair bobPreKey = ECKeyPair.generate();
     IdentityKeyPair bobIdentityKey = bobStore.getIdentityKeyPair();
     SignedPreKeyRecord bobSignedPreKey = generateSignedPreKey(bobIdentityKey, 2);
     KyberPreKeyRecord bobKyberPreKey = generateKyberPreKey(bobIdentityKey, 12);
@@ -449,7 +463,7 @@ public class SealedSessionCipherTest extends TestCase {
     SessionBuilder aliceSessionBuilderForBob = new SessionBuilder(aliceStore, bobAddress);
     aliceSessionBuilderForBob.process(bobBundle);
 
-    ECKeyPair carolPreKey = Curve.generateKeyPair();
+    ECKeyPair carolPreKey = ECKeyPair.generate();
     IdentityKeyPair carolIdentityKey = carolStore.getIdentityKeyPair();
     SignedPreKeyRecord carolSignedPreKey = generateSignedPreKey(carolIdentityKey, 2);
     KyberPreKeyRecord carolKyberPreKey = generateKyberPreKey(carolIdentityKey, 12);
@@ -470,7 +484,7 @@ public class SealedSessionCipherTest extends TestCase {
     SessionBuilder aliceSessionBuilderForCarol = new SessionBuilder(aliceStore, carolAddress);
     aliceSessionBuilderForCarol.process(carolBundle);
 
-    ECKeyPair trustRoot = Curve.generateKeyPair();
+    ECKeyPair trustRoot = ECKeyPair.generate();
     SenderCertificate senderCertificate =
         createCertificateFor(
             trustRoot,
@@ -539,7 +553,7 @@ public class SealedSessionCipherTest extends TestCase {
     SignalProtocolAddress carolAddress =
         new SignalProtocolAddress("38381c3b-2606-4ca7-9310-7cb927f2ab4a", 1);
 
-    ECKeyPair bobPreKey = Curve.generateKeyPair();
+    ECKeyPair bobPreKey = ECKeyPair.generate();
     IdentityKeyPair bobIdentityKey = bobStore.getIdentityKeyPair();
     SignedPreKeyRecord bobSignedPreKey = generateSignedPreKey(bobIdentityKey, 2);
     KyberPreKeyRecord bobKyberPreKey = generateKyberPreKey(bobIdentityKey, 12);
@@ -560,7 +574,7 @@ public class SealedSessionCipherTest extends TestCase {
     SessionBuilder aliceSessionBuilderForBob = new SessionBuilder(aliceStore, bobAddress);
     aliceSessionBuilderForBob.process(bobBundle);
 
-    ECKeyPair trustRoot = Curve.generateKeyPair();
+    ECKeyPair trustRoot = ECKeyPair.generate();
     SenderCertificate senderCertificate =
         createCertificateFor(
             trustRoot,
@@ -635,7 +649,7 @@ public class SealedSessionCipherTest extends TestCase {
     SignalProtocolAddress carolAddress =
         new SignalProtocolAddress("38381c3b-2606-4ca7-9310-7cb927f2ab4a", 1);
 
-    ECKeyPair bobPreKey = Curve.generateKeyPair();
+    ECKeyPair bobPreKey = ECKeyPair.generate();
     IdentityKeyPair bobIdentityKey = bobStore.getIdentityKeyPair();
     SignedPreKeyRecord bobSignedPreKey = generateSignedPreKey(bobIdentityKey, 2);
     KyberPreKeyRecord bobKyberPreKey = generateKyberPreKey(bobIdentityKey, 12);
@@ -656,7 +670,7 @@ public class SealedSessionCipherTest extends TestCase {
     SessionBuilder aliceSessionBuilderForBob = new SessionBuilder(aliceStore, bobAddress);
     aliceSessionBuilderForBob.process(bobBundle);
 
-    ECKeyPair carolPreKey = Curve.generateKeyPair();
+    ECKeyPair carolPreKey = ECKeyPair.generate();
     IdentityKeyPair carolIdentityKey = carolStore.getIdentityKeyPair();
     SignedPreKeyRecord carolSignedPreKey = generateSignedPreKey(carolIdentityKey, 2);
     KyberPreKeyRecord carolKyberPreKey = generateKyberPreKey(carolIdentityKey, 12);
@@ -677,7 +691,7 @@ public class SealedSessionCipherTest extends TestCase {
     SessionBuilder aliceSessionBuilderForCarol = new SessionBuilder(aliceStore, carolAddress);
     aliceSessionBuilderForCarol.process(carolBundle);
 
-    ECKeyPair trustRoot = Curve.generateKeyPair();
+    ECKeyPair trustRoot = ECKeyPair.generate();
     SenderCertificate senderCertificate =
         createCertificateFor(
             trustRoot,
@@ -761,7 +775,7 @@ public class SealedSessionCipherTest extends TestCase {
 
     initializeSessions(aliceStore, bobStore, bobAddress);
 
-    ECKeyPair trustRoot = Curve.generateKeyPair();
+    ECKeyPair trustRoot = ECKeyPair.generate();
     SenderCertificate senderCertificate =
         createCertificateFor(
             trustRoot,
@@ -840,7 +854,7 @@ public class SealedSessionCipherTest extends TestCase {
 
     initializeSessions(aliceStore, bobStore, bobAddress);
 
-    ECKeyPair trustRoot = Curve.generateKeyPair();
+    ECKeyPair trustRoot = ECKeyPair.generate();
     CertificateValidator certificateValidator = new CertificateValidator(trustRoot.getPublicKey());
     SenderCertificate senderCertificate =
         createCertificateFor(
@@ -901,7 +915,7 @@ public class SealedSessionCipherTest extends TestCase {
       ECPublicKey identityKey,
       long expires)
       throws InvalidKeyException, InvalidCertificateException {
-    ECKeyPair serverKey = Curve.generateKeyPair();
+    ECKeyPair serverKey = ECKeyPair.generate();
     ServerCertificate serverCertificate =
         new ServerCertificate(trustRoot.getPrivateKey(), 1, serverKey.getPublicKey());
     return serverCertificate.issue(
@@ -918,7 +932,7 @@ public class SealedSessionCipherTest extends TestCase {
       TestInMemorySignalProtocolStore bobStore,
       SignalProtocolAddress bobAddress)
       throws InvalidKeyException, UntrustedIdentityException {
-    ECKeyPair bobPreKey = Curve.generateKeyPair();
+    ECKeyPair bobPreKey = ECKeyPair.generate();
     IdentityKeyPair bobIdentityKey = bobStore.getIdentityKeyPair();
     SignedPreKeyRecord bobSignedPreKey = generateSignedPreKey(bobIdentityKey, 2);
     KyberPreKeyRecord bobKyberPreKey = generateKyberPreKey(bobIdentityKey, 12);

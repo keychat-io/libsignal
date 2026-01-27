@@ -3,15 +3,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-import { randomBytes } from 'crypto';
-import { RANDOM_LENGTH } from '../internal/Constants';
-import * as Native from '../../../Native';
-import ServerPublicParams from '../ServerPublicParams';
-import ReceiptCredential from './ReceiptCredential';
-import ReceiptCredentialPresentation from './ReceiptCredentialPresentation';
-import ReceiptCredentialRequestContext from './ReceiptCredentialRequestContext';
-import ReceiptCredentialResponse from './ReceiptCredentialResponse';
-import ReceiptSerial from './ReceiptSerial';
+import { randomBytes } from 'node:crypto';
+import { RANDOM_LENGTH } from '../internal/Constants.js';
+import * as Native from '../../Native.js';
+import ServerPublicParams from '../ServerPublicParams.js';
+import ReceiptCredential from './ReceiptCredential.js';
+import ReceiptCredentialPresentation from './ReceiptCredentialPresentation.js';
+import ReceiptCredentialRequestContext from './ReceiptCredentialRequestContext.js';
+import ReceiptCredentialResponse from './ReceiptCredentialResponse.js';
+import ReceiptSerial from './ReceiptSerial.js';
 
 export default class ClientZkReceiptOperations {
   serverPublicParams: ServerPublicParams;
@@ -31,12 +31,12 @@ export default class ClientZkReceiptOperations {
   }
 
   createReceiptCredentialRequestContextWithRandom(
-    random: Buffer,
+    random: Uint8Array,
     receiptSerial: ReceiptSerial
   ): ReceiptCredentialRequestContext {
     return new ReceiptCredentialRequestContext(
       Native.ServerPublicParams_CreateReceiptCredentialRequestContextDeterministic(
-        this.serverPublicParams.getContents(),
+        this.serverPublicParams,
         random,
         receiptSerial.getContents()
       )
@@ -49,7 +49,7 @@ export default class ClientZkReceiptOperations {
   ): ReceiptCredential {
     return new ReceiptCredential(
       Native.ServerPublicParams_ReceiveReceiptCredential(
-        this.serverPublicParams.getContents(),
+        this.serverPublicParams,
         receiptCredentialRequestContext.getContents(),
         receiptCredentialResponse.getContents()
       )
@@ -67,12 +67,12 @@ export default class ClientZkReceiptOperations {
   }
 
   createReceiptCredentialPresentationWithRandom(
-    random: Buffer,
+    random: Uint8Array,
     receiptCredential: ReceiptCredential
   ): ReceiptCredentialPresentation {
     return new ReceiptCredentialPresentation(
       Native.ServerPublicParams_CreateReceiptCredentialPresentationDeterministic(
-        this.serverPublicParams.getContents(),
+        this.serverPublicParams,
         random,
         receiptCredential.getContents()
       )

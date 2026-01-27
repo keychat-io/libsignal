@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import org.signal.libsignal.internal.Native;
+import org.signal.libsignal.internal.NativeHandleGuard;
 import org.signal.libsignal.protocol.ServiceId;
 import org.signal.libsignal.zkgroup.profiles.ProfileKey;
 
@@ -22,15 +23,12 @@ public class CdsiLookupRequest {
 
   final Map<ServiceId, ProfileKey> serviceIds;
 
-  final boolean requireAcis;
-
   final byte[] token;
 
   public CdsiLookupRequest(
       Set<String> previousE164s,
       Set<String> newE164s,
       Map<ServiceId, ProfileKey> serviceIds,
-      boolean requireAcis,
       Optional<byte[]> token) {
     if (previousE164s.size() > 0 && !token.isPresent()) {
       throw new IllegalArgumentException("You must have a token if you have previousE164s!");
@@ -40,65 +38,51 @@ public class CdsiLookupRequest {
     this.newE164s = newE164s;
     this.removedE164s = Collections.emptySet();
     this.serviceIds = serviceIds;
-    this.requireAcis = requireAcis;
     this.token = token.orElse(null);
   }
 
   NativeRequest makeNative() {
     return new NativeRequest(
-        this.previousE164s,
-        this.newE164s,
-        this.removedE164s,
-        this.serviceIds,
-        this.requireAcis,
-        this.token);
+        this.previousE164s, this.newE164s, this.removedE164s, this.serviceIds, this.token);
   }
 
-  class NativeRequest {
+  class NativeRequest extends NativeHandleGuard.SimpleOwner {
     private NativeRequest(
         Set<String> previousE164s,
         Set<String> newE164s,
         Set<String> removedE164s,
         Map<ServiceId, ProfileKey> serviceIds,
-        boolean requireAcis,
         byte[] token) {
-      this.nativeHandle = Native.LookupRequest_new();
+      super(Native.LookupRequest_new());
+      guardedRun(
+          (nativeHandle) -> {
+            for (String e164 : previousE164s) {
+              Native.LookupRequest_addPreviousE164(nativeHandle, e164);
+            }
 
-      for (String e164 : previousE164s) {
-        Native.LookupRequest_addPreviousE164(this.nativeHandle, e164);
-      }
+            for (String e164 : newE164s) {
+              Native.LookupRequest_addE164(nativeHandle, e164);
+            }
 
-      for (String e164 : newE164s) {
-        Native.LookupRequest_addE164(this.nativeHandle, e164);
-      }
+            filterExceptions(
+                () -> {
+                  for (Map.Entry<ServiceId, ProfileKey> entry : serviceIds.entrySet()) {
+                    Native.LookupRequest_addAciAndAccessKey(
+                        nativeHandle,
+                        entry.getKey().toServiceIdFixedWidthBinary(),
+                        entry.getValue().deriveAccessKey());
+                  }
+                });
 
-      filterExceptions(
-          () -> {
-            for (Map.Entry<ServiceId, ProfileKey> entry : serviceIds.entrySet()) {
-              Native.LookupRequest_addAciAndAccessKey(
-                  this.nativeHandle,
-                  entry.getKey().toServiceIdFixedWidthBinary(),
-                  entry.getValue().deriveAccessKey());
+            if (token != null) {
+              Native.LookupRequest_setToken(nativeHandle, token);
             }
           });
-
-      Native.LookupRequest_setReturnAcisWithoutUaks(this.nativeHandle, requireAcis);
-
-      if (token != null) {
-        Native.LookupRequest_setToken(this.nativeHandle, token);
-      }
-    }
-
-    long getHandle() {
-      return this.nativeHandle;
     }
 
     @Override
-    @SuppressWarnings("deprecation")
-    protected void finalize() {
-      Native.LookupRequest_Destroy(this.nativeHandle);
+    protected void release(long nativeHandle) {
+      Native.LookupRequest_Destroy(nativeHandle);
     }
-
-    private long nativeHandle;
   }
 }

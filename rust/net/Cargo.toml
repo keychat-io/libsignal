@@ -1,62 +1,101 @@
 [package]
 name = "libsignal-net"
 version = "0.1.0"
-edition = "2021"
-authors = ["Signal Messenger LLC"]
-license = "AGPL-3.0-only"
+edition = "2024"
+rust-version = "1.85"
+authors.workspace = true
+license.workspace = true
+
+[features]
+test-util = ["libsignal-net-infra/test-util"]
+tower-service = ["libsignal-net-infra/tower-service"]
+
+[lints]
+workspace = true
 
 [dependencies]
-libsignal-svr3 = { path = "../svr3"}
-attest = { path = "../attest" }
-async-trait = "0.1.41"
-base64 = "0.21"
-bincode = "1.0"
-boring = { git = "https://github.com/signalapp/boring", branch = "libsignal" }
-bytes = "1.4.0"
-const-str = { version = "0.5.6", features = ["std"] }
-derive-where = "1.2.7"
-displaydoc = "0.2"
-futures-util = "0.3.7"
-hex = "0.4"
-hex-literal = "0.4.1"
-hkdf = "0.12.3"
-hmac = "0.12"
-http = "1.0.0"
-http-body-util = "0.1.0-rc.3"
-hyper = { version = "1.0.0-rc.4", features = ["http1", "http2", "client"] }
-itertools = "0.12.0"
-lazy_static = "1.4.0"
-libsignal-core = { path = "../core" }
-log = "0.4.19"
-pin-project-lite = "0.2.4"
-prost = "0.12.1"
-rand = "0.8.0"
-rand_core = "0.6"
-rustls-native-certs = "0.6.3"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10.8"
-thiserror = "1.0.38"
-tokio = { version = "1", features = ["rt", "time", "macros"] }
-tokio-boring = { git = "https://github.com/signalapp/boring", branch = "libsignal" }
-tokio-tungstenite = { version = "0.21.0" }
-tokio-util = "0.7.9"
-tungstenite = { version = "0.21.0" }
-url = "2.4.1"
-uuid = "1.1.2"
+libsignal-net-infra = { path = "infra" }
+
+attest = { workspace = true }
+libsignal-account-keys = { workspace = true }
+libsignal-core = { workspace = true }
+libsignal-keytrans = { workspace = true }
+libsignal-protocol = { workspace = true }
+libsignal-svrb = { workspace = true }
+signal-crypto = { workspace = true }
+
+assert_matches = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bincode = { workspace = true }
+boring-signal = { workspace = true }
+bytes = { workspace = true }
+const-str = { workspace = true }
+derive-where = { workspace = true }
+derive_more = { workspace = true, features = ["debug", "from", "try_from"] }
+displaydoc = { workspace = true }
+either = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+http = { workspace = true }
+itertools = { workspace = true }
+log = { workspace = true }
+nonzero_ext = { workspace = true }
+pin-project = { workspace = true }
+prost = { workspace = true }
+protobuf = { workspace = true }
+rand = { workspace = true }
+rand_core = { workspace = true }
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = { workspace = true }
+scopeguard = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+static_assertions = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time", "macros"] }
+tokio-boring-signal = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+tokio-tungstenite = { workspace = true }
+tonic = { workspace = true, default-features = false }
+tungstenite = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
+visibility = { workspace = true }
+zerocopy = { workspace = true }
 
 [build-dependencies]
-prost-build = "0.12.1"
+prost-build = { workspace = true }
 
 [dev-dependencies]
-assert_matches = "1.5.0"
-clap = { version = "4.4.11", features = ["derive"] }
-env_logger = "0.10.0"
-nonzero_ext = "0.3.0"
-proptest = "1.4.0"
-proptest-state-machine = "0.1.0"
-snow = "0.9.5"
-tokio = { version = "1", features = ["test-util", "rt-multi-thread"] }
-tokio-stream = "0.1.14"
-url = "2.4.1"
-warp = { version = "0.3.6", features = ["tls"] }
+libsignal-net = { path = ".", features = ["test-util"] }
+
+clap = { workspace = true, features = ["derive", "env"] }
+either = { workspace = true }
+env_logger = { workspace = true }
+futures = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+proptest = { workspace = true }
+rand_chacha = { workspace = true }
+test-case = { workspace = true }
+test-log = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "io-std", "rt-multi-thread"] }
+url = { workspace = true }
+warp = { workspace = true, features = ["server", "websocket"] }
+
+[[example]]
+name = "chat_smoke_test"
+required-features = ["test-util"]
+
+[[example]]
+name = "svrb_test"
+required-features = ["test-util"]
+
+[[test]]
+name = "chat_connect_timing"
+required-features = ["test-util"]

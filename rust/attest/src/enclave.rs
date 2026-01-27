@@ -6,26 +6,20 @@
 use std::collections::HashMap;
 
 use displaydoc::Display;
+use prost::Message;
 
 use crate::client_connection::ClientConnection;
 use crate::svr2::RaftConfig;
-use crate::{client_connection, dcap, nitro, proto, snow_resolver};
-use prost::Message;
+use crate::{client_connection, dcap, proto, snow_resolver};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+/// Failure to attest remote enclave.
+#[error("{message}")]
 pub struct AttestationError {
     message: String,
 }
-
-impl std::fmt::Display for AttestationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.message.fmt(f)
-    }
-}
-
-impl std::error::Error for AttestationError {}
 
 impl From<dcap::Error> for AttestationError {
     fn from(e: dcap::Error) -> Self {
@@ -36,36 +30,18 @@ impl From<dcap::Error> for AttestationError {
 }
 
 /// Error types for an enclave noise session.
-#[derive(Display, Debug)]
+#[derive(Display, Debug, thiserror::Error)]
 pub enum Error {
     /// failure to attest remote enclave: {0:?}
-    AttestationError(AttestationError),
+    AttestationError(#[from] AttestationError),
     /// failure to communicate on established Noise channel to the enclave: {0}
-    NoiseError(client_connection::Error),
+    NoiseError(#[from] client_connection::Error),
     /// failure to complete Noise handshake to the enclave: {0}
-    NoiseHandshakeError(snow::Error),
+    NoiseHandshakeError(#[from] snow::Error),
     /// attestation data invalid: {reason}
     AttestationDataError { reason: String },
     /// invalid bridge state
     InvalidBridgeStateError,
-}
-
-impl From<snow::Error> for Error {
-    fn from(e: snow::Error) -> Self {
-        Error::NoiseHandshakeError(e)
-    }
-}
-
-impl From<AttestationError> for Error {
-    fn from(err: AttestationError) -> Error {
-        Error::AttestationError(err)
-    }
-}
-
-impl From<client_connection::Error> for Error {
-    fn from(err: client_connection::Error) -> Self {
-        Error::NoiseError(err)
-    }
 }
 
 impl From<prost::DecodeError> for Error {
@@ -76,18 +52,10 @@ impl From<prost::DecodeError> for Error {
     }
 }
 
-impl From<nitro::NitroError> for AttestationError {
-    fn from(err: nitro::NitroError) -> Self {
-        AttestationError {
-            message: err.to_string(),
-        }
-    }
-}
-
-impl From<nitro::NitroError> for Error {
-    fn from(err: nitro::NitroError) -> Self {
-        Self::AttestationError(err.into())
-    }
+#[derive(Clone, Copy)]
+pub enum HandshakeType {
+    PreQuantum,
+    PostQuantum,
 }
 
 /// A noise handshaker that can be used to build a [client_connection::ClientConnection]
@@ -102,7 +70,7 @@ impl From<nitro::NitroError> for Error {
 /// ```pseudocode
 ///   let websocket = ... open websocket ...
 ///   let attestation_msg = websocket.recv();
-///   let (evidence, endoresments) = parse(attestation_msg);
+///   let (evidence, endorsements) = parse(attestation_msg);
 ///   let mut handshake = Handshake::new(
 ///     mrenclave, evidence, endorsements, acceptable_sw_advisories, current_time)?;
 ///   websocket.send(handshaker.initial_request());
@@ -124,23 +92,45 @@ impl Handshake {
     /// Completes client connection initiation, returns a valid client connection.
     pub fn complete(mut self, initial_received: &[u8]) -> Result<ClientConnection> {
         self.handshake.read_message(initial_received, &mut [])?;
+        let handshake_hash = self.handshake.get_handshake_hash().to_vec();
         let transport = self.handshake.into_transport_mode()?;
         log::info!("Successfully completed attested connection");
-        Ok(ClientConnection { transport })
+        Ok(ClientConnection {
+            handshake_hash,
+            transport,
+        })
     }
 
-    pub(crate) fn with_claims(claims: Claims) -> Result<UnvalidatedHandshake> {
+    pub(crate) fn with_claims(claims: Claims, typ: HandshakeType) -> Result<UnvalidatedHandshake> {
+        let pattern = match typ {
+            HandshakeType::PreQuantum => client_connection::NOISE_PATTERN,
+            HandshakeType::PostQuantum => client_connection::NOISE_PATTERN_HFS,
+        };
         let mut handshake = snow::Builder::with_resolver(
-            client_connection::NOISE_PATTERN.parse().expect("valid"),
+            pattern.parse().expect("valid"),
             Box::new(snow_resolver::Resolver),
         )
         .remote_public_key(&claims.public_key)
-        .build_initiator()?;
+        .expect("not called previously")
+        .build_initiator()
+        .map_err(|_| {
+            // The only thing that can go wrong is that claims.public_key is invalid, which isn't a
+            // fault in the Noise handshake. Produce a data error instead to indicate this (and for
+            // simpler exception logic in the apps).
+            //
+            // In practice the current version of Noise does not even check this up front, so we
+            // can't test this. But a future version could and the previous reasoning stands.
+            Error::AttestationDataError {
+                reason: "invalid public key".to_string(),
+            }
+        })?;
         let mut initial_request = vec![0u8; client_connection::NOISE_HANDSHAKE_OVERHEAD];
         // We send an empty message, but the round-trip to the server and back is still required
         // in order to complete the noise handshake. If we needed some initial payload we could
         // add it here in future.
-        let size = handshake.write_message(&[], &mut initial_request)?;
+        let size = handshake
+            .write_message(&[], &mut initial_request)
+            .expect("properly sized");
         initial_request.truncate(size);
         Ok(UnvalidatedHandshake(Self {
             handshake,
@@ -166,8 +156,7 @@ impl UnvalidatedHandshake {
         if expected_raft_config != *actual_config {
             return Err(Error::AttestationDataError {
                 reason: format!(
-                    "Unexpected raft config {:?} (expected {:?})",
-                    actual_config, expected_raft_config
+                    "Unexpected raft config {actual_config:?} (expected {expected_raft_config:?})"
                 ),
             });
         }
@@ -181,8 +170,8 @@ impl UnvalidatedHandshake {
 
 pub struct Claims {
     pub(crate) public_key: Vec<u8>,
-    pub(crate) raft_group_config: Option<proto::svr2::RaftGroupConfig>,
-    #[allow(dead_code)]
+    pub(crate) raft_group_config: Option<proto::svr::RaftGroupConfig>,
+    #[expect(dead_code, reason = "this field is never read")]
     pub(crate) custom: HashMap<String, Vec<u8>>,
 }
 
@@ -196,7 +185,7 @@ impl Claims {
 
         let raft_group_config = claims
             .remove("config")
-            .map(|bytes| proto::svr2::RaftGroupConfig::decode(bytes.as_slice()))
+            .map(|bytes| proto::svr::RaftGroupConfig::decode(bytes.as_slice()))
             .transpose()?;
 
         Ok(Self {
@@ -206,7 +195,7 @@ impl Claims {
         })
     }
 
-    pub fn from_attestation_data(data: proto::svr2::AttestationData) -> Result<Self> {
+    pub fn from_attestation_data(data: proto::svr::AttestationData) -> Result<Self> {
         let raft_group_config = data
             .group_config
             .ok_or_else(|| Error::AttestationDataError {

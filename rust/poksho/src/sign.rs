@@ -3,11 +3,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+use curve25519_dalek::ristretto::RistrettoPoint;
+use curve25519_dalek::scalar::Scalar;
+
 use crate::args::*;
 use crate::errors::*;
 use crate::statement::*;
-use curve25519_dalek::ristretto::RistrettoPoint;
-use curve25519_dalek::scalar::Scalar;
 
 // Signatures are such a common ZKP that we provide special functions for them:
 pub fn sign(
@@ -46,11 +47,12 @@ pub fn verify_signature(
 mod tests {
     #![allow(non_snake_case)]
 
-    use super::*;
     use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
 
+    use super::*;
+
     #[test]
-    #[allow(clippy::needless_range_loop, clippy::unwrap_used)]
+    #[expect(clippy::cast_possible_truncation, clippy::needless_range_loop)]
     fn test_signature() {
         let mut block64 = [0u8; 64];
         let mut block32 = [0u8; 32];

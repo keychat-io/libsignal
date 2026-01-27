@@ -3,11 +3,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use futures_util::try_join;
-use neon::prelude::*;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use futures_util::try_join;
+use neon::prelude::*;
 use signal_neon_futures::*;
 
 struct NameStore {
@@ -71,7 +71,7 @@ pub fn double_name_from_store(mut cx: FunctionContext) -> JsResult<JsPromise> {
             store.finalize(cx);
             match result {
                 Ok(doubled) => Ok(cx.string(doubled)),
-                Err(message) => cx.throw_error(format!("rejected: {}", message)),
+                Err(message) => cx.throw_error(format!("rejected: {message}")),
             }
         })
     })
@@ -94,7 +94,7 @@ pub fn double_name_from_store_using_join(mut cx: FunctionContext) -> JsResult<Js
             store.finalize(cx);
             match result {
                 Ok(doubled) => Ok(cx.string(doubled)),
-                Err(message) => cx.throw_error(format!("rejected: {}", message)),
+                Err(message) => cx.throw_error(format!("rejected: {message}")),
             }
         })
     })

@@ -6,9 +6,14 @@
 import Foundation
 import SignalFfi
 
-public struct Username {
+public struct Username: Sendable {
     public let value: String
-    public let hash: [UInt8]
+    public let hash: Data
+
+    internal init(_ value: String, uncheckedHash: Data) {
+        self.value = value
+        self.hash = uncheckedHash
+    }
 
     public init<S: StringProtocol>(_ s: S) throws {
         self.value = String(s)
@@ -33,11 +38,18 @@ public struct Username {
         try self.init(username)
     }
 
-    public init(nickname: String, discriminator: String, withValidLengthWithin lengthRange: ClosedRange<UInt32>) throws {
+    public init(nickname: String, discriminator: String, withValidLengthWithin lengthRange: ClosedRange<UInt32>) throws
+    {
         self.hash = try nickname.withCString { nickname in
             try discriminator.withCString { discriminator in
                 try invokeFnReturningFixedLengthArray {
-                    signal_username_hash_from_parts($0, nickname, discriminator, lengthRange.lowerBound, lengthRange.upperBound)
+                    signal_username_hash_from_parts(
+                        $0,
+                        nickname,
+                        discriminator,
+                        lengthRange.lowerBound,
+                        lengthRange.upperBound
+                    )
                 }
             }
         }
@@ -45,35 +57,33 @@ public struct Username {
         self.value = "\(nickname).\(discriminator)"
     }
 
-    public func generateProof(withRandomness randomness: Randomness? = nil) -> [UInt8] {
+    public func generateProof(withRandomness randomness: Randomness? = nil) -> Data {
         failOnError {
             let randomness = try randomness ?? Randomness.generate()
             return try self.value.withCString { strPtr in
-                try withUnsafeBytes(of: randomness.bytes) { randBytes in
-                    try randBytes.withUnsafeBorrowedBuffer { randPtr in
-                        try invokeFnReturningArray {
-                            signal_username_proof($0, strPtr, randPtr)
-                        }
+                try withUnsafePointer(to: randomness.bytes) { randomBytes in
+                    try invokeFnReturningData {
+                        signal_username_proof($0, strPtr, randomBytes)
                     }
                 }
             }
         }
     }
 
-    public func createLink(previousEntropy: [UInt8]? = nil) throws -> ([UInt8], [UInt8]) {
+    public func createLink(previousEntropy: Data? = nil) throws -> (Data, Data) {
         let bytes = failOnError {
             try self.value.withCString { usernamePtr in
-                try (previousEntropy ?? []).withUnsafeBorrowedBuffer { entropyPtr in
-                    try invokeFnReturningArray {
+                try (previousEntropy ?? Data()).withUnsafeBorrowedBuffer { entropyPtr in
+                    try invokeFnReturningData {
                         signal_username_link_create($0, usernamePtr, entropyPtr)
                     }
                 }
             }
         }
-        return (Array(bytes[..<32]), Array(bytes[32...]))
+        return (bytes.subdata(in: 0..<32), bytes.subdata(in: 32..<bytes.count))
     }
 
-    public static func verify(proof: [UInt8], forHash hash: [UInt8]) throws {
+    public static func verify(proof: Data, forHash hash: Data) throws {
         try checkError(
             proof.withUnsafeBorrowedBuffer { proofPtr in
                 hash.withUnsafeBorrowedBuffer { hashPtr in
@@ -104,7 +114,7 @@ extension Username: CustomStringConvertible {
 
 extension Username: Equatable {}
 
-private func generateHash(_ s: String) throws -> [UInt8] {
+private func generateHash(_ s: String) throws -> Data {
     try s.withCString { strPtr in
         try invokeFnReturningFixedLengthArray {
             signal_username_hash($0, strPtr)

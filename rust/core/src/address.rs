@@ -7,18 +7,26 @@
 
 //! Types for identifying an individual Signal client instance.
 
+use std::fmt;
+use std::num::NonZeroU8;
+
 use uuid::Uuid;
 
-use std::fmt;
-
 /// Known types of [ServiceId].
-#[derive(Clone, Copy, Hash, PartialEq, Eq, num_enum::IntoPrimitive, num_enum::TryFromPrimitive)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, derive_more::TryFrom)]
+#[try_from(repr)]
 #[repr(u8)]
 pub enum ServiceIdKind {
     /// An [Aci].
     Aci,
     /// A [Pni].
     Pni,
+}
+
+impl From<ServiceIdKind> for u8 {
+    fn from(value: ServiceIdKind) -> Self {
+        value as u8
+    }
 }
 
 impl fmt::Display for ServiceIdKind {
@@ -36,16 +44,20 @@ impl fmt::Debug for ServiceIdKind {
     }
 }
 
+/// The error returned for a failed "downcast" conversion from a [`ServiceId`] to a specific kind of
+/// service ID (e.g. [`Pni`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WrongKindOfServiceIdError {
+    /// The kind of service ID being converted to.
     pub expected: ServiceIdKind,
+    /// The actual kind of the service ID being converted.
     pub actual: ServiceIdKind,
 }
 
 /// A service ID with a known type.
 ///
 /// `RAW_KIND` is a raw [ServiceIdKind] (eventually Rust will allow enums as generic parameters).
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SpecificServiceId<const RAW_KIND: u8>(Uuid);
 
 impl<const KIND: u8> SpecificServiceId<KIND> {
@@ -60,6 +72,14 @@ impl<const KIND: u8> SpecificServiceId<KIND> {
     #[inline]
     const fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
+    }
+}
+
+// We can go back to derive(Hash) if the uuid crate makes a similar change:
+// https://github.com/uuid-rs/uuid/issues/775
+impl<const KIND: u8> std::hash::Hash for SpecificServiceId<KIND> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(self.0.as_bytes());
     }
 }
 
@@ -157,7 +177,7 @@ pub type ServiceIdFixedWidthBinaryBytes = [u8; 17];
 ///
 /// Conceptually this is a UUID in a particular "namespace" representing a particular way to reach a
 /// user on the Signal service.
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, derive_more::From)]
 pub enum ServiceId {
     /// An ACI
     Aci(Aci),
@@ -267,25 +287,16 @@ impl ServiceId {
             ServiceId::Pni(pni) => pni.into(),
         }
     }
+
+    /// Constructs a [ProtocolAddress] from this service ID and a device ID.
+    pub fn to_protocol_address(&self, device_id: DeviceId) -> ProtocolAddress {
+        ProtocolAddress::new(self.service_id_string(), device_id)
+    }
 }
 
 impl fmt::Debug for ServiceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<{}:{}>", self.kind(), self.raw_uuid())
-    }
-}
-
-impl From<Aci> for ServiceId {
-    #[inline]
-    fn from(aci: Aci) -> Self {
-        Self::Aci(aci)
-    }
-}
-
-impl From<Pni> for ServiceId {
-    #[inline]
-    fn from(pni: Pni) -> Self {
-        Self::Pni(pni)
     }
 }
 
@@ -327,9 +338,11 @@ where
 
 #[cfg(test)]
 mod service_id_tests {
-    use proptest::prelude::*;
-
     use std::borrow::Borrow;
+
+    use proptest::prelude::*;
+    use rand::rng;
+    use rand::seq::SliceRandom;
 
     use super::*;
 
@@ -483,7 +496,7 @@ mod service_id_tests {
         let aci = Aci::from(uuid);
         assert_eq!(
             "<ACI:8c78cd2a-16ff-427d-83dc-1a5e36ce713d>",
-            format!("{:?}", aci)
+            format!("{aci:?}")
         );
         assert_eq!(
             "<ACI:8c78cd2a-16ff-427d-83dc-1a5e36ce713d>",
@@ -492,7 +505,7 @@ mod service_id_tests {
         let pni = Pni::from(uuid);
         assert_eq!(
             "<PNI:8c78cd2a-16ff-427d-83dc-1a5e36ce713d>",
-            format!("{:?}", pni)
+            format!("{pni:?}")
         );
         assert_eq!(
             "<PNI:8c78cd2a-16ff-427d-83dc-1a5e36ce713d>",
@@ -538,7 +551,7 @@ mod service_id_tests {
             ServiceId::parse_from_service_id_string("00000000-0000-0000-0000-000000000001")
                 .expect("can decode");
         assert_eq!(
-            &hex_literal::hex!("00000000 0000 0000 0000 000000000001"),
+            &const_str::hex!("00000000 0000 0000 0000 000000000001"),
             service_id.raw_uuid().as_bytes(),
         );
         assert_eq!(ServiceIdKind::Aci, service_id.kind());
@@ -571,10 +584,10 @@ mod service_id_tests {
             ServiceId::parse_from_service_id_string("PNI:8c78cd2a16ff427d83dc1a5e36ce713d")
                 .is_none()
         );
-        assert!(ServiceId::parse_from_service_id_string(
-            "PNI:{8c78cd2a-16ff-427d-83dc-1a5e36ce713d}"
-        )
-        .is_none());
+        assert!(
+            ServiceId::parse_from_service_id_string("PNI:{8c78cd2a-16ff-427d-83dc-1a5e36ce713d}")
+                .is_none()
+        );
     }
 
     #[test]
@@ -603,6 +616,58 @@ mod service_id_tests {
         );
         assert!(ServiceId::parse_from_service_id_string("ACI:{uuid}").is_none());
     }
+
+    #[test]
+    fn ordering() {
+        let test_uuid = uuid::uuid!("8c78cd2a-16ff-427d-83dc-1a5e36ce713d");
+
+        let mut ids: [ServiceId; 4] = [
+            Aci::from_uuid(Uuid::nil()).into(),
+            Aci::from_uuid(test_uuid).into(),
+            Pni::from_uuid(Uuid::nil()).into(),
+            Pni::from_uuid(test_uuid).into(),
+        ];
+        let original = ids;
+        ids.shuffle(&mut rng());
+        ids.sort();
+        assert_eq!(original, ids);
+    }
+
+    #[test]
+    fn ordering_consistency() {
+        proptest!(|(
+            left_uuid_bytes: [u8; 16],
+            left_raw_kind in 0..=1,
+            right_uuid_bytes: [u8; 16],
+            right_raw_kind in 0..=1
+        )| {
+            let service_id_constructor = |raw_type| match raw_type {
+                0 => |uuid: Uuid| ServiceId::Aci(uuid.into()),
+                1 => |uuid: Uuid| ServiceId::Pni(uuid.into()),
+                _ => unreachable!("unexpected raw type {raw_type}"),
+            };
+
+            let left_uuid = Uuid::from_bytes(left_uuid_bytes);
+            let left_service_id = service_id_constructor(left_raw_kind)(left_uuid);
+            let right_uuid = Uuid::from_bytes(right_uuid_bytes);
+            let right_service_id = service_id_constructor(right_raw_kind)(right_uuid);
+
+            assert_eq!(
+                left_service_id.cmp(&right_service_id),
+                left_service_id.service_id_fixed_width_binary()
+                    .cmp(&right_service_id.service_id_fixed_width_binary()),
+                "didn't match Service-Id-FixedWidthBinary ordering ({left_service_id:?} vs {right_service_id:?})",
+            );
+
+            if left_raw_kind == right_raw_kind {
+                assert_eq!(
+                    left_service_id.cmp(&right_service_id),
+                    left_service_id.service_id_string().cmp(&right_service_id.service_id_string()),
+                    "same-kind ServiceIds didn't match Service-Id-String ordering ({left_service_id:?} vs {right_service_id:?})",
+                );
+            }
+        })
+    }
 }
 
 /// The type used in memory to represent a *device*, i.e. a particular Signal client instance which
@@ -610,23 +675,92 @@ mod service_id_tests {
 ///
 /// Used in [ProtocolAddress].
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Ord)]
-pub struct DeviceId(u32);
+pub struct DeviceId(NonZeroU8);
 
-impl From<u32> for DeviceId {
-    fn from(value: u32) -> Self {
-        Self(value)
+#[derive(Copy, Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("device ID is out of range")]
+/// Error for trying to construct a [`DeviceId`] with an invalid value.
+pub struct InvalidDeviceId;
+
+impl DeviceId {
+    /// Creates a new `DeviceId` if the value is in range.
+    ///
+    /// If the value is not in the range `1..=127`, an `InvalidDeviceId` error is
+    /// returned instead.
+    #[inline]
+    pub const fn new(id: u8) -> Result<Self, InvalidDeviceId> {
+        let Some(id) = NonZeroU8::new(id) else {
+            return Err(InvalidDeviceId);
+        };
+        Self::new_nonzero(id)
+    }
+
+    /// Creates a new `DeviceId` if the value is in range.
+    ///
+    /// If the value is not in the range `1..=127`, an `InvalidDeviceId` error is
+    /// returned instead.
+    pub const fn new_nonzero(id: NonZeroU8) -> Result<Self, InvalidDeviceId> {
+        if id.get() <= MAX_VALID_DEVICE_ID {
+            Ok(Self(id))
+        } else {
+            Err(InvalidDeviceId)
+        }
     }
 }
 
+const MAX_VALID_DEVICE_ID: u8 = 127;
+
 impl From<DeviceId> for u32 {
     fn from(value: DeviceId) -> Self {
+        value.0.get().into()
+    }
+}
+
+impl From<DeviceId> for u8 {
+    fn from(value: DeviceId) -> Self {
+        value.0.get()
+    }
+}
+
+impl From<DeviceId> for NonZeroU8 {
+    fn from(value: DeviceId) -> Self {
         value.0
+    }
+}
+
+impl TryFrom<u8> for DeviceId {
+    type Error = InvalidDeviceId;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<i32> for DeviceId {
+    type Error = InvalidDeviceId;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        Self::new(value.try_into().map_err(|_| InvalidDeviceId)?)
+    }
+}
+
+impl TryFrom<u32> for DeviceId {
+    type Error = InvalidDeviceId;
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::new(value.try_into().map_err(|_| InvalidDeviceId)?)
     }
 }
 
 impl fmt::Display for DeviceId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl rand::distr::Distribution<DeviceId> for rand::distr::StandardUniform {
+    fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> DeviceId {
+        DeviceId(
+            NonZeroU8::new(rng.random_range(1..=MAX_VALID_DEVICE_ID))
+                .expect("guaranteed by random_range"),
+        )
     }
 }
 
@@ -641,7 +775,7 @@ impl ProtocolAddress {
     /// Create a new address.
     ///
     /// - `name` defines a user's public identity, and therefore must be globally unique to that
-    /// user.
+    ///   user.
     /// - Each Signal client instance then has its own `device_id`, which must be unique among
     ///   all clients for that user.
     ///
@@ -651,7 +785,7 @@ impl ProtocolAddress {
     /// // This is a unique id for some user, typically a UUID.
     /// let user_id: String = "04899A85-4C9E-44CC-8428-A02AB69335F1".to_string();
     /// // Each client instance representing that user has a unique device id.
-    /// let device_id: DeviceId = 2_u32.into();
+    /// let device_id: DeviceId = 2_u32.try_into().unwrap();
     /// let address = ProtocolAddress::new(user_id.clone(), device_id);
     ///
     /// assert!(address.name() == &user_id);

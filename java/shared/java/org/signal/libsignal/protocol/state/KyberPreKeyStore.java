@@ -6,8 +6,12 @@
 package org.signal.libsignal.protocol.state;
 
 import java.util.List;
+import org.signal.libsignal.internal.CalledFromNative;
 import org.signal.libsignal.protocol.InvalidKeyIdException;
+import org.signal.libsignal.protocol.ReusedBaseKeyException;
+import org.signal.libsignal.protocol.ecc.ECPublicKey;
 
+@CalledFromNative
 public interface KyberPreKeyStore {
 
   /**
@@ -43,9 +47,17 @@ public interface KyberPreKeyStore {
   /**
    * Mark a KyberPreKeyRecord in the local storage as used.
    *
-   * <p>Remove if it is a one-time pre key and noop if it is last-resort.
+   * <p>If it's a one-time pre-key, remove it.
    *
-   * @param kyberPreKeyId The ID of the KyberPreKeyRecord to marked.
+   * <p>If it's a last-resort pre-key, check whether this specific <code>
+   * (kyberPreKeyId, signedPreKeyId, baseKey)</code> tuple has been seen before, and throw an
+   * exception if so. If not, record it for later. Entries can be removed when either the Kyber key
+   * or the last-resort key is <strong>deleted</strong> (not just rotated).
+   *
+   * @param kyberPreKeyId The ID of the KyberPreKeyRecord to be marked.
+   * @param signedPreKeyId The ID of the SignedPreKeyRecord that was used with this Kyber pre-key.
+   * @param baseKey The session-specific key from the sender used with this Kyber pre-key.
    */
-  public void markKyberPreKeyUsed(int kyberPreKeyId);
+  public void markKyberPreKeyUsed(int kyberPreKeyId, int signedPreKeyId, ECPublicKey baseKey)
+      throws ReusedBaseKeyException;
 }

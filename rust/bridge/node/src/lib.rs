@@ -7,44 +7,33 @@
 
 use futures::executor;
 use libsignal_bridge::node::{AssumedImmutableBuffer, ResultTypeInfo, SignalNodeError};
-use libsignal_protocol::{IdentityKeyPair, SealedSenderV2SentMessage};
+use libsignal_protocol::SealedSenderV2SentMessage;
 use minidump::Minidump;
 use minidump_processor::ProcessorOptions;
-use minidump_unwind::symbols::string_symbol_supplier;
 use minidump_unwind::Symbolizer;
+use minidump_unwind::symbols::string_symbol_supplier;
 use neon::prelude::*;
 use neon::types::buffer::TypedArray;
 
 mod logging;
 
+// Import bridged functions. Without this, the compiler and/or linker are too
+// smart and don't include the symbols in the library.
+#[allow(unused)]
+use libsignal_bridge_testing::*;
+
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
     libsignal_bridge::node::register(&mut cx)?;
     cx.export_function("initLogger", logging::init_logger)?;
-    cx.export_function("IdentityKeyPair_Deserialize", identitykeypair_deserialize)?;
     cx.export_function(
         "SealedSenderMultiRecipientMessage_Parse",
         sealed_sender_multi_recipient_message_parse,
     )?;
     cx.export_function("MinidumpToJSONString", minidump_to_json_string)?;
+    let remote_config_keys = libsignal_bridge::net::RemoteConfigKey::KEYS.convert_into(&mut cx)?;
+    cx.export_value("NetRemoteConfigKeys", remote_config_keys)?;
     Ok(())
-}
-
-/// ts: export function IdentityKeyPair_Deserialize(buffer: Buffer): { publicKey: PublicKey, privateKey: PrivateKey }
-fn identitykeypair_deserialize(mut cx: FunctionContext) -> JsResult<JsObject> {
-    let buffer = cx.argument::<JsBuffer>(0)?;
-    let identity_keypair_or_error = IdentityKeyPair::try_from(buffer.as_slice(&cx));
-    let identity_keypair = identity_keypair_or_error.or_else(|e| {
-        let module = cx.this()?;
-        SignalNodeError::throw(e, &mut cx, module, "identitykeypair_deserialize")?;
-        unreachable!()
-    })?;
-    let public_key = identity_keypair.public_key().convert_into(&mut cx)?;
-    let private_key = identity_keypair.private_key().convert_into(&mut cx)?;
-    let result = cx.empty_object();
-    result.set(&mut cx, "publicKey", public_key)?;
-    result.set(&mut cx, "privateKey", private_key)?;
-    Ok(result)
 }
 
 struct ArrayBuilder<'a> {
@@ -73,21 +62,16 @@ impl<'a> From<ArrayBuilder<'a>> for Handle<'a, JsArray> {
     }
 }
 
-/// ts: export function SealedSenderMultiRecipientMessage_Parse(buffer: Buffer): SealedSenderMultiRecipientMessage
+/// ts: export function SealedSenderMultiRecipientMessage_Parse(buffer: Uint8Array): SealedSenderMultiRecipientMessage
 fn sealed_sender_multi_recipient_message_parse(mut cx: FunctionContext) -> JsResult<JsObject> {
-    let buffer_arg = cx.argument::<JsBuffer>(0)?;
+    let buffer_arg = cx.argument::<JsUint8Array>(0)?;
     let buffer = AssumedImmutableBuffer::new(&cx, buffer_arg);
     let messages = match SealedSenderV2SentMessage::parse(&buffer) {
         Ok(messages) => messages,
         Err(e) => {
-            let module = cx.this()?;
-            SignalNodeError::throw(
-                e,
-                &mut cx,
-                module,
-                "sealed_sender_multi_recipient_parse_sent_message",
-            )?;
-            unreachable!()
+            let throwable =
+                e.into_throwable(&mut cx, "sealed_sender_multi_recipient_parse_sent_message");
+            cx.throw(throwable)?
         }
     };
 
@@ -159,9 +143,9 @@ fn sealed_sender_multi_recipient_message_parse(mut cx: FunctionContext) -> JsRes
     Ok(result)
 }
 
-/// ts: export function MinidumpToJSONString(buffer: Buffer): string
+/// ts: export function MinidumpToJSONString(buffer: Uint8Array): string
 fn minidump_to_json_string(mut cx: FunctionContext) -> JsResult<JsString> {
-    let buffer_arg = cx.argument::<JsBuffer>(0)?;
+    let buffer_arg = cx.argument::<JsUint8Array>(0)?;
     let dump = Minidump::read(buffer_arg.as_slice(&cx)).expect("Failed to parse minidump");
     let provider = Symbolizer::new(string_symbol_supplier(std::collections::HashMap::new()));
     let options = ProcessorOptions::default();
@@ -176,5 +160,5 @@ fn minidump_to_json_string(mut cx: FunctionContext) -> JsResult<JsString> {
         .print_json(&mut json, false)
         .expect("Failed to print json");
 
-    return Ok(cx.string(std::str::from_utf8(&json).expect("Failed to convert JSON to utf8")));
+    Ok(cx.string(std::str::from_utf8(&json).expect("Failed to convert JSON to utf8")))
 }

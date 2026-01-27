@@ -11,34 +11,40 @@ import org.signal.libsignal.internal.Native;
 import org.signal.libsignal.internal.NativeHandleGuard;
 import org.signal.libsignal.protocol.InvalidKeyException;
 
-public class Aes256Ctr32 implements NativeHandleGuard.Owner {
-  private final long unsafeHandle;
-
+/**
+ * Implements the <a
+ * href="https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Counter_(CTR)">AES-256-CTR</a>
+ * stream cipher with a 12-byte nonce and an initial counter.
+ *
+ * <p>CTR mode is built on XOR, so encrypting and decrypting are the same operation.
+ */
+public class Aes256Ctr32 extends NativeHandleGuard.SimpleOwner {
   public Aes256Ctr32(byte[] key, byte[] nonce, int initialCtr) throws InvalidKeyException {
-    this.unsafeHandle =
+    super(
         filterExceptions(
-            InvalidKeyException.class, () -> Native.Aes256Ctr32_New(key, nonce, initialCtr));
+            InvalidKeyException.class, () -> Native.Aes256Ctr32_New(key, nonce, initialCtr)));
   }
 
   @Override
-  @SuppressWarnings("deprecation")
-  protected void finalize() {
-    Native.Aes256Ctr32_Destroy(this.unsafeHandle);
+  protected void release(long nativeHandle) {
+    Native.Aes256Ctr32_Destroy(nativeHandle);
   }
 
-  public long unsafeNativeHandleWithoutGuard() {
-    return this.unsafeHandle;
-  }
-
+  /**
+   * Encrypts the plaintext, or decrypts the ciphertext, in {@code data}, in place, advancing the
+   * state of the cipher.
+   */
   public void process(byte[] data) {
-    try (NativeHandleGuard guard = new NativeHandleGuard(this)) {
-      Native.Aes256Ctr32_Process(guard.nativeHandle(), data, 0, data.length);
-    }
+    this.process(data, 0, data.length);
   }
 
+  /**
+   * Encrypts the plaintext, or decrypts the ciphertext, in {@code data}, in place, advancing the
+   * state of the cipher.
+   *
+   * <p>Bytes outside the designated offset/length are unchanged.
+   */
   public void process(byte[] data, int offset, int length) {
-    try (NativeHandleGuard guard = new NativeHandleGuard(this)) {
-      Native.Aes256Ctr32_Process(guard.nativeHandle(), data, offset, length);
-    }
+    guardedRun((nativeHandle) -> Native.Aes256Ctr32_Process(nativeHandle, data, offset, length));
   }
 }

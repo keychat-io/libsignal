@@ -9,6 +9,8 @@ import SignalFfi
 internal typealias ServiceIdStorage = SignalServiceIdFixedWidthBinaryBytes
 
 internal func == (_ lhs: ServiceIdStorage, _ rhs: ServiceIdStorage) -> Bool {
+    // swift-format-ignore
+    // (vertical alignment is clearer)
     return lhs.0 == rhs.0 &&
         lhs.1 == rhs.1 &&
         lhs.2 == rhs.2 &&
@@ -32,7 +34,7 @@ internal func != (_ lhs: ServiceIdStorage, _ rhs: ServiceIdStorage) -> Bool {
     return !(lhs == rhs)
 }
 
-public enum ServiceIdKind: UInt8 {
+public enum ServiceIdKind: UInt8, Sendable {
     case aci = 0
     case pni = 1
 }
@@ -42,7 +44,14 @@ public enum ServiceIdError: Error {
     case wrongServiceIdKind
 }
 
-public class ServiceId {
+/// Typed representation of a Signal service ID, which can be one of various types.
+///
+/// Conceptually this is a UUID in a particular "namespace" representing a particular way to reach a
+/// user on the Signal service.
+///
+/// The sort order for ServiceIds is first by kind (ACI, then PNI), then lexicographically by the
+/// bytes of the UUID.
+public class ServiceId: @unchecked Sendable {
     private var storage: ServiceIdStorage = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
     fileprivate init(fromFixedWidthBinary storage: ServiceIdStorage) {
@@ -91,18 +100,18 @@ public class ServiceId {
         }
     }
 
-    public var serviceIdBinary: [UInt8] {
+    public var serviceIdBinary: Data {
         return failOnError {
             try withUnsafePointer(to: self.storage) { ptr in
-                try invokeFnReturningArray {
+                try invokeFnReturningData {
                     signal_service_id_service_id_binary($0, ptr)
                 }
             }
         }
     }
 
-    public var serviceIdFixedWidthBinary: [UInt8] {
-        return withUnsafeBytes(of: self.storage) { Array($0) }
+    public var serviceIdFixedWidthBinary: Data {
+        return withUnsafeBytes(of: self.storage) { Data($0) }
     }
 
     private func downcast<SpecificId: ServiceId>(to subclass: SpecificId.Type) throws -> SpecificId {
@@ -145,12 +154,14 @@ public class ServiceId {
         return try result.downcast(to: Self.self)
     }
 
-    internal func withPointerToFixedWidthBinary<R>(_ callback: (UnsafePointer<ServiceIdStorage>) throws -> R) rethrows -> R {
+    internal func withPointerToFixedWidthBinary<R>(
+        _ callback: (UnsafePointer<ServiceIdStorage>) throws -> R
+    ) rethrows -> R {
         return try callback(&self.storage)
     }
 
-    internal static func concatenatedFixedWidthBinary(_ serviceIds: [ServiceId]) -> [UInt8] {
-        var result = Array(repeating: 0 as UInt8, count: serviceIds.count * MemoryLayout<ServiceIdStorage>.size)
+    internal static func concatenatedFixedWidthBinary(_ serviceIds: some Collection<ServiceId>) -> Data {
+        var result = Data(count: serviceIds.count * MemoryLayout<ServiceIdStorage>.size)
         var offset = 0
         for next in serviceIds {
             withUnsafeBytes(of: next.storage) {
@@ -168,6 +179,16 @@ extension ServiceId: Equatable {
     }
 }
 
+extension ServiceId: Comparable {
+    public static func < (_ lhs: ServiceId, _ rhs: ServiceId) -> Bool {
+        return withUnsafeBytes(of: lhs.storage) { lhsBytes in
+            withUnsafeBytes(of: rhs.storage) { rhsBytes in
+                lhsBytes.lexicographicallyPrecedes(rhsBytes)
+            }
+        }
+    }
+}
+
 extension ServiceId: Hashable {
     public func hash(into hasher: inout Hasher) {
         withUnsafeBytes(of: self.storage) { buffer in
@@ -182,7 +203,7 @@ extension ServiceId: CustomDebugStringConvertible {
     }
 }
 
-public class Aci: ServiceId {
+public class Aci: ServiceId, @unchecked Sendable {
     public init(fromUUID uuid: UUID) {
         super.init(.aci, uuid)
     }
@@ -192,7 +213,7 @@ public class Aci: ServiceId {
     }
 }
 
-public class Pni: ServiceId {
+public class Pni: ServiceId, @unchecked Sendable {
     public init(fromUUID uuid: UUID) {
         super.init(.pni, uuid)
     }

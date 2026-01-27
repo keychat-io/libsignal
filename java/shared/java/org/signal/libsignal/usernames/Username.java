@@ -54,12 +54,17 @@ public final class Username {
 
   public Username(String username) throws BaseUsernameException {
     this.username = Objects.requireNonNull(username, "username");
-    this.hash = hash(username);
+    this.hash = filterExceptions(BaseUsernameException.class, () -> Native.Username_Hash(username));
   }
 
   private Username(String username, byte[] hash) {
     this.username = username;
     this.hash = hash;
+  }
+
+  // This could be `internal` in Kotlin.
+  public static Username _withPrecomputedHash(String username, byte[] hash) {
+    return new Username(username, hash);
   }
 
   public String getUsername() {
@@ -131,28 +136,6 @@ public final class Username {
     final byte[] entropy = Arrays.copyOfRange(bytes, 0, 32);
     final byte[] enctyptedUsername = Arrays.copyOfRange(bytes, 32, bytes.length);
     return new UsernameLink(entropy, enctyptedUsername);
-  }
-
-  @Deprecated
-  public static List<String> generateCandidates(
-      String nickname, int minNicknameLength, int maxNicknameLength) throws BaseUsernameException {
-    Object[] names =
-        filterExceptions(
-            BaseUsernameException.class,
-            () -> Native.Username_CandidatesFrom(nickname, minNicknameLength, maxNicknameLength));
-    return Arrays.asList((String[]) names);
-  }
-
-  @Deprecated
-  public static byte[] hash(String username) throws BaseUsernameException {
-    return filterExceptions(BaseUsernameException.class, () -> Native.Username_Hash(username));
-  }
-
-  @Deprecated
-  public static byte[] generateProof(String username, byte[] randomness)
-      throws BaseUsernameException {
-    return filterExceptions(
-        BaseUsernameException.class, () -> Native.Username_Proof(username, randomness));
   }
 
   public static void verifyProof(byte[] proof, byte[] hash) throws BaseUsernameException {

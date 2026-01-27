@@ -3,16 +3,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use crate::common::constants::*;
-use crate::common::errors::*;
-use crate::common::simple_types::*;
-use crate::{api, crypto};
 use partial_default::PartialDefault;
 use serde::{Deserialize, Serialize, Serializer};
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+use crate::common::constants::*;
+use crate::common::errors::*;
+use crate::common::serialization::VersionByte;
+use crate::common::simple_types::*;
+use crate::{api, crypto};
+
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct ProfileKeyCredentialPresentationV1 {
-    pub(crate) reserved: ReservedBytes,
+    pub(crate) version: u8, // Not ReservedByte or VersionByte to allow deserializing a V2 presentation as V1.
     pub(crate) proof: crypto::proofs::ProfileKeyCredentialPresentationProofV1,
     pub(crate) uid_enc_ciphertext: crypto::uid_encryption::Ciphertext,
     pub(crate) profile_key_enc_ciphertext: crypto::profile_key_encryption::Ciphertext,
@@ -35,9 +37,9 @@ impl ProfileKeyCredentialPresentationV1 {
 }
 
 /// Like [`ProfileKeyCredentialPresentationV1`], but with an optimized proof.
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct ProfileKeyCredentialPresentationV2 {
-    pub(crate) version: ReservedBytes,
+    pub(crate) version: VersionByte<PRESENTATION_VERSION_2>,
     pub(crate) proof: crypto::proofs::ProfileKeyCredentialPresentationProofV2,
     pub(crate) uid_enc_ciphertext: crypto::uid_encryption::Ciphertext,
     pub(crate) profile_key_enc_ciphertext: crypto::profile_key_encryption::Ciphertext,
@@ -59,9 +61,9 @@ impl ProfileKeyCredentialPresentationV2 {
     }
 }
 
-#[derive(Serialize, Deserialize, PartialDefault)]
+#[derive(Clone, Serialize, Deserialize, PartialDefault)]
 pub struct ExpiringProfileKeyCredentialPresentation {
-    pub(crate) version: ReservedBytes,
+    pub(crate) version: VersionByte<PRESENTATION_VERSION_3>,
     pub(crate) proof: crypto::proofs::ExpiringProfileKeyCredentialPresentationProof,
     pub(crate) uid_enc_ciphertext: crypto::uid_encryption::Ciphertext,
     pub(crate) profile_key_enc_ciphertext: crypto::profile_key_encryption::Ciphertext,
@@ -88,6 +90,7 @@ impl ExpiringProfileKeyCredentialPresentation {
     }
 }
 
+#[derive(derive_more::From)]
 pub enum AnyProfileKeyCredentialPresentation {
     V1(ProfileKeyCredentialPresentationV1),
     V2(ProfileKeyCredentialPresentationV2),
@@ -98,26 +101,18 @@ impl AnyProfileKeyCredentialPresentation {
     pub fn new(presentation_bytes: &[u8]) -> Result<Self, ZkGroupDeserializationFailure> {
         match presentation_bytes[0] {
             PRESENTATION_VERSION_1 => {
-                match crate::deserialize::<ProfileKeyCredentialPresentationV1>(presentation_bytes) {
-                    Ok(presentation) => Ok(AnyProfileKeyCredentialPresentation::V1(presentation)),
-                    Err(_) => Err(ZkGroupDeserializationFailure),
-                }
+                crate::deserialize::<ProfileKeyCredentialPresentationV1>(presentation_bytes)
+                    .map(AnyProfileKeyCredentialPresentation::V1)
             }
             PRESENTATION_VERSION_2 => {
-                match crate::deserialize::<ProfileKeyCredentialPresentationV2>(presentation_bytes) {
-                    Ok(presentation) => Ok(AnyProfileKeyCredentialPresentation::V2(presentation)),
-                    Err(_) => Err(ZkGroupDeserializationFailure),
-                }
+                crate::deserialize::<ProfileKeyCredentialPresentationV2>(presentation_bytes)
+                    .map(AnyProfileKeyCredentialPresentation::V2)
             }
             PRESENTATION_VERSION_3 => {
-                match crate::deserialize::<ExpiringProfileKeyCredentialPresentation>(
-                    presentation_bytes,
-                ) {
-                    Ok(presentation) => Ok(AnyProfileKeyCredentialPresentation::V3(presentation)),
-                    Err(_) => Err(ZkGroupDeserializationFailure),
-                }
+                crate::deserialize::<ExpiringProfileKeyCredentialPresentation>(presentation_bytes)
+                    .map(AnyProfileKeyCredentialPresentation::V3)
             }
-            _ => Err(ZkGroupDeserializationFailure),
+            _ => Err(ZkGroupDeserializationFailure::new::<Self>()),
         }
     }
 
@@ -151,7 +146,7 @@ impl AnyProfileKeyCredentialPresentation {
 
     pub fn to_structurally_valid_v1_presentation_bytes(&self) -> Vec<u8> {
         let v1 = ProfileKeyCredentialPresentationV1 {
-            reserved: [PRESENTATION_VERSION_1],
+            version: PRESENTATION_VERSION_1,
             proof: crypto::proofs::ProfileKeyCredentialPresentationProofV1::from_invalid_proof(
                 // Hardcoded length of a valid v1 proof.
                 vec![0; 0x0140],
@@ -181,21 +176,5 @@ impl Serialize for AnyProfileKeyCredentialPresentation {
                 presentation.serialize(serializer)
             }
         }
-    }
-}
-
-impl From<ProfileKeyCredentialPresentationV1> for AnyProfileKeyCredentialPresentation {
-    fn from(presentation: ProfileKeyCredentialPresentationV1) -> Self {
-        Self::V1(presentation)
-    }
-}
-impl From<ProfileKeyCredentialPresentationV2> for AnyProfileKeyCredentialPresentation {
-    fn from(presentation: ProfileKeyCredentialPresentationV2) -> Self {
-        Self::V2(presentation)
-    }
-}
-impl From<ExpiringProfileKeyCredentialPresentation> for AnyProfileKeyCredentialPresentation {
-    fn from(presentation: ExpiringProfileKeyCredentialPresentation) -> Self {
-        Self::V3(presentation)
     }
 }

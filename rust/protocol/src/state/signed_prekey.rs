@@ -3,29 +3,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use crate::proto::storage::SignedPreKeyRecordStructure;
-use crate::{kem, KeyPair, PrivateKey, PublicKey, Result, SignalProtocolError};
-
-use prost::Message;
-
 use std::convert::AsRef;
 use std::fmt;
 
+use prost::Message;
+
+use crate::proto::storage::SignedPreKeyRecordStructure;
+use crate::{KeyPair, PrivateKey, PublicKey, Result, SignalProtocolError, Timestamp, kem};
+
 /// A unique identifier selecting among this client's known signed pre-keys.
-#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(
+    Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, derive_more::From, derive_more::Into,
+)]
 pub struct SignedPreKeyId(u32);
-
-impl From<u32> for SignedPreKeyId {
-    fn from(value: u32) -> Self {
-        Self(value)
-    }
-}
-
-impl From<SignedPreKeyId> for u32 {
-    fn from(value: SignedPreKeyId) -> Self {
-        value.0
-    }
-}
 
 impl fmt::Display for SignedPreKeyId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -40,7 +30,7 @@ pub struct SignedPreKeyRecord {
 
 impl SignedPreKeyRecord {
     pub fn private_key(&self) -> Result<PrivateKey> {
-        PrivateKey::deserialize(&self.get_storage().private_key)
+        Ok(PrivateKey::deserialize(&self.get_storage().private_key)?)
     }
 }
 
@@ -66,10 +56,11 @@ pub trait GenericSignedPreKey {
     fn get_storage(&self) -> &SignedPreKeyRecordStructure;
     fn from_storage(storage: SignedPreKeyRecordStructure) -> Self;
 
-    fn new(id: Self::Id, timestamp: u64, key_pair: &Self::KeyPair, signature: &[u8]) -> Self
+    fn new(id: Self::Id, timestamp: Timestamp, key_pair: &Self::KeyPair, signature: &[u8]) -> Self
     where
         Self: Sized,
     {
+        let timestamp = timestamp.epoch_millis();
         let public_key = key_pair.get_public().serialize();
         let private_key = key_pair.get_private().serialize();
         let signature = signature.to_vec();
@@ -100,8 +91,8 @@ pub trait GenericSignedPreKey {
         Ok(self.get_storage().id.into())
     }
 
-    fn timestamp(&self) -> Result<u64> {
-        Ok(self.get_storage().timestamp)
+    fn timestamp(&self) -> Result<Timestamp> {
+        Ok(Timestamp::from_epoch_millis(self.get_storage().timestamp))
     }
 
     fn signature(&self) -> Result<Vec<u8>> {
@@ -143,7 +134,7 @@ impl KeySerde for PublicKey {
     }
 
     fn deserialize<T: AsRef<[u8]>>(bytes: T) -> Result<Self> {
-        Self::deserialize(bytes.as_ref())
+        Ok(Self::deserialize(bytes.as_ref())?)
     }
 }
 
@@ -153,7 +144,7 @@ impl KeySerde for PrivateKey {
     }
 
     fn deserialize<T: AsRef<[u8]>>(bytes: T) -> Result<Self> {
-        Self::deserialize(bytes.as_ref())
+        Ok(Self::deserialize(bytes.as_ref())?)
     }
 }
 
@@ -187,7 +178,7 @@ impl KeyPairSerde for KeyPair {
     type PrivateKey = PrivateKey;
 
     fn from_public_and_private(public_key: &[u8], private_key: &[u8]) -> Result<Self> {
-        KeyPair::from_public_and_private(public_key, private_key)
+        Ok(KeyPair::from_public_and_private(public_key, private_key)?)
     }
 
     fn get_public(&self) -> &PublicKey {

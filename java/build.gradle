@@ -1,53 +1,72 @@
+import org.gradle.api.publish.PublishingExtension
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
 plugins {
     id "base"
     id "signing"
-    id "com.diffplug.spotless" version "6.20.0"
-    id "io.github.gradle-nexus.publish-plugin" version "1.3.0"
+    id "com.diffplug.spotless" version "7.2.1"
+
+    id "org.jetbrains.kotlin.jvm" version "2.1.0" apply false
+    id "org.jetbrains.dokka" version "2.0.0" apply false
+
+    // These plugins need to be loaded together, so we must declare them up front.
+    id 'com.android.library' version "8.10.1" apply false
+    id 'org.jetbrains.kotlin.android' version "2.1.0" apply false
+}
+
+repositories {
+    mavenCentral()
+    google()
+    mavenLocal()
 }
 
 allprojects {
-    version = "0.41.0"
+    version = "0.86.13"
     group   = "org.signal"
-}
 
-subprojects {
-    if (JavaVersion.current().isJava8Compatible()) {
-        allprojects {
-            tasks.withType(Javadoc) {
-                options.encoding = 'UTF-8'
-                options.addStringOption('Xdoclint:none', '-quiet')
-            }
-        }
+    tasks.withType(JavaCompile) {
+        options.encoding = 'UTF-8'
+        options.compilerArgs += ["-Xlint:deprecation", "-Xlint:fallthrough", "-Xlint:unchecked"]
+    }
+    tasks.withType(Javadoc) {
+        options.encoding = 'UTF-8'
+        options.addStringOption('Xdoclint:none', '-quiet')
+    }
+    tasks.withType(KotlinCompile).configureEach {
+        compilerOptions.jvmTarget = JvmTarget.JVM_17
+    }
+    tasks.withType(AbstractArchiveTask) {
+        preserveFileTimestamps = false
+        reproducibleFileOrder = true
     }
 
-    allprojects {
-        tasks.withType(JavaCompile) {
-            options.encoding = 'UTF-8'
-            options.compilerArgs += ["-Xlint:deprecation", "-Xlint:fallthrough", "-Xlint:unchecked"]
-        }
-    }
-
-    apply plugin: "com.diffplug.spotless"
-    spotless {
-        java {
-            target('**/*.java')
-            targetExclude('**/Native.java')
-            importOrder()
-            removeUnusedImports()
-
-            googleJavaFormat()
-            formatAnnotations()
-            licenseHeaderFile rootProject.file('license_header.txt')
-        }
-    }
+    apply plugin: "org.jetbrains.dokka"
 }
 
 task makeJniLibrariesDesktop(type:Exec) {
   group 'Rust'
   description 'Build the JNI libraries'
 
+  def debugLevelLogsFlag = project.hasProperty('debugLevelLogs') ? ['--debug-level-logs'] : []
+  def jniTypeTaggingFlag = project.hasProperty('jniTypeTagging') ? ['--jni-type-tagging'] : []
+  def jniCheckAnnotationsFlag = project.hasProperty('jniCheckAnnotations') ? ['--jni-check-annotations'] : []
+  def debugFlag = project.hasProperty('debugRust') ? ['--debug'] : []
   // Explicitly specify 'bash' for Windows compatibility.
-  commandLine 'bash', './build_jni.sh', 'desktop'
+  commandLine 'bash', './build_jni.sh', *debugLevelLogsFlag, *jniTypeTaggingFlag, *jniCheckAnnotationsFlag, *debugFlag, 'desktop'
+}
+
+task makeJniLibrariesServer(type:Exec) {
+  group 'Rust'
+  description 'Build the JNI libraries'
+
+  def debugLevelLogsFlag = project.hasProperty('debugLevelLogs') ? ['--debug-level-logs'] : []
+  def jniTypeTaggingFlag = project.hasProperty('jniTypeTagging') ? ['--jni-type-tagging'] : []
+  def jniCheckAnnotationsFlag = project.hasProperty('jniCheckAnnotations') ? ['--jni-check-annotations'] : []
+  def debugFlag = project.hasProperty('debugRust') ? ['--debug'] : []
+  def target = project.hasProperty('crossCompileServer') ? 'server-all' : 'server'
+  // Explicitly specify 'bash' for Windows compatibility.
+  commandLine 'bash', './build_jni.sh', *debugLevelLogsFlag, *jniTypeTaggingFlag, *jniCheckAnnotationsFlag, *debugFlag, target
 }
 
 task cargoClean(type:Exec) {
@@ -60,7 +79,12 @@ task cleanJni(type: Delete) {
   delete fileTree('./android/src/main/jniLibs') {
     include '**/*.so'
   }
-  delete fileTree('./shared/resources') {
+  delete fileTree('./client/src/main/resources') {
+    include '**/*.so'
+    include '**/*.dylib'
+    include '**/*.dll'
+  }
+  delete fileTree('./server/src/main/resources') {
     include '**/*.so'
     include '**/*.dylib'
     include '**/*.dll'
@@ -71,7 +95,7 @@ clean.dependsOn([cargoClean, cleanJni])
 
 // PUBLISHING
 
-ext.setUpSigningKey = { signingExt -> 
+ext.setUpSigningKey = { signingExt ->
     def signingKeyId = findProperty("signingKeyId")
     def signingKey = findProperty("signingKey")
     def signingPassword = findProperty("signingPassword")
@@ -80,15 +104,58 @@ ext.setUpSigningKey = { signingExt ->
     }
 }
 
-nexusPublishing {
-    repositories {
-        sonatype {
-            username = project.findProperty('sonatypeUsername') ?: ""
-            password = project.findProperty('sonatypePassword') ?: ""
+subprojects { subproject ->
+    subproject.plugins.withId('maven-publish') {
+        subproject.extensions.configure(PublishingExtension) { publishing ->
+            publishing.repositories {
+                maven {
+                    name = "SignalBuildArtifacts"
+                    // We can't use Gradle's built-in GCS support with the way we authenticate
+                    // GitHub Actions. Fortunately, GCS's REST APIs are basically just normal HTTP
+                    // GET/PUT with an auth token, which is compatible with what Gradle will do.
+                    url = subproject.uri("https://storage.googleapis.com/build-artifacts.signal.org/libraries/maven")
+                    credentials(HttpHeaderCredentials) {
+                        name = "Authorization"
+                        value = "Bearer ${System.getenv("CLOUDSDK_AUTH_ACCESS_TOKEN") ?: ""}"
+                    }
+                    authentication {
+                        header(HttpHeaderAuthentication)
+                    }
+                }
+            }
         }
     }
 }
 
 def isReleaseBuild() {
     return version.contains("SNAPSHOT") == false
+}
+
+// Late evaluation after this point.
+
+evaluationDependsOnChildren()
+
+spotless {
+    kotlin {
+        target allprojects.collectMany {
+            return it.tasks.withType(KotlinCompile)
+        }.inject(files()) { collected, next ->
+            collected + next.sources
+        }
+        targetExclude('**/Native.kt', '**/NativeTesting.kt', '**/org/rustls/**')
+        ktlint()
+    }
+    java {
+        target allprojects.collectMany {
+            return it.tasks.withType(JavaCompile)
+        }.inject(files()) { collected, next ->
+            collected + next.source
+        }
+        importOrder()
+        removeUnusedImports()
+
+        googleJavaFormat()
+        formatAnnotations()
+        licenseHeaderFile rootProject.file('license_header.txt')
+    }
 }

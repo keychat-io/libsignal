@@ -10,7 +10,7 @@ use prost::Message;
 
 use crate::crypto::hmac_sha256;
 use crate::proto::storage as storage_proto;
-use crate::{consts, PrivateKey, PublicKey, SignalProtocolError};
+use crate::{PrivateKey, PublicKey, SignalProtocolError, consts};
 
 /// A distinct error type to keep from accidentally propagating deserialization errors.
 #[derive(Debug)]
@@ -97,11 +97,18 @@ impl SenderChainKey {
         &self.chain_key
     }
 
-    pub(crate) fn next(&self) -> SenderChainKey {
-        SenderChainKey::new(
-            self.iteration + 1,
+    pub(crate) fn next(&self) -> Result<SenderChainKey, SignalProtocolError> {
+        let new_iteration = self.iteration.checked_add(1).ok_or_else(|| {
+            SignalProtocolError::InvalidState(
+                "sender_chain_key_next",
+                "Sender chain is too long".into(),
+            )
+        })?;
+
+        Ok(SenderChainKey::new(
+            new_iteration,
             self.get_derivative(Self::CHAIN_KEY_SEED),
-        )
+        ))
     }
 
     pub(crate) fn sender_message_key(&self) -> SenderMessageKey {
@@ -297,8 +304,7 @@ impl SenderKeyRecord {
 
         if self.remove_states_with_chain_id(chain_id) > 0 {
             log::warn!(
-                "Removed a matching chain_id ({}) found with a different public key",
-                chain_id
+                "Removed a matching chain_id ({chain_id}) found with a different public key"
             );
         }
 
@@ -360,14 +366,14 @@ impl SenderKeyRecord {
 #[cfg(test)]
 mod sender_key_record_add_sender_key_state_tests {
     use itertools::Itertools;
+    use rand::TryRngCore as _;
     use rand::rngs::OsRng;
 
+    use super::*;
     use crate::KeyPair;
 
-    use super::*;
-
     fn random_public_key() -> PublicKey {
-        KeyPair::generate(&mut OsRng).public_key
+        KeyPair::generate(&mut OsRng.unwrap_err()).public_key
     }
 
     fn chain_key(i: u128) -> Vec<u8> {
@@ -581,5 +587,52 @@ mod sender_key_record_add_sender_key_state_tests {
         context.add_sender_key_state_record(record_key_1, &chain_key_3);
 
         context.assert_record_order(vec![record_key_1, record_key_2]);
+    }
+}
+
+#[cfg(test)]
+mod sender_chain_key_iteration_tests {
+    use std::collections::HashSet;
+
+    use assert_matches::assert_matches;
+
+    use super::SenderChainKey;
+    use crate::SignalProtocolError;
+
+    const INITIAL_ITERATION: u32 = 0;
+    const INITIAL_SEED_KEY: [u8; 4] = [1, 2, 3, 4];
+
+    #[test]
+    fn iteration() {
+        let mut sender_chain_key =
+            SenderChainKey::new(INITIAL_ITERATION, INITIAL_SEED_KEY.to_vec());
+
+        let mut seen_seeds = HashSet::new();
+        seen_seeds.insert(sender_chain_key.seed().to_vec());
+
+        for i in 1..10 {
+            let next_chain_key = sender_chain_key
+                .next()
+                .expect("Expect chain key to not overflow after only a few iterations");
+            let next_seed = next_chain_key.seed().to_vec();
+
+            assert!(
+                seen_seeds.insert(next_seed),
+                "Seed has already been seen before for iteration {i}"
+            );
+            assert_eq!(next_chain_key.iteration(), INITIAL_ITERATION + i);
+
+            sender_chain_key = next_chain_key;
+        }
+    }
+
+    #[test]
+    fn when_sender_chain_key_iteration_overflows() {
+        let sender_chain_key: SenderChainKey =
+            SenderChainKey::new(u32::MAX, INITIAL_SEED_KEY.to_vec());
+        assert_matches!(
+            sender_chain_key.next(),
+            Err(SignalProtocolError::InvalidState { .. })
+        );
     }
 }

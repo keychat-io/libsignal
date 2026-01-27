@@ -24,7 +24,6 @@
 
 mod consts;
 mod crypto;
-mod curve;
 pub mod error;
 mod fingerprint;
 mod group_cipher;
@@ -40,37 +39,36 @@ mod session;
 mod session_cipher;
 mod state;
 mod storage;
-mod utils;
+mod timestamp;
 
 use error::Result;
-
-pub use libsignal_core::{
-    Aci, DeviceId, Pni, ProtocolAddress, ServiceId, ServiceIdFixedWidthBinaryBytes, ServiceIdKind,
-};
-
-pub use curve::{KeyPair, PrivateKey, PublicKey};
 pub use error::SignalProtocolError;
-pub use fingerprint::{DisplayableFingerprint, Fingerprint, ScannableFingerprint};
+pub use fingerprint::{
+    DisplayableFingerprint, Error as FingerprintError, Fingerprint, ScannableFingerprint,
+};
 pub use group_cipher::{
     create_sender_key_distribution_message, group_decrypt, group_encrypt,
     process_sender_key_distribution_message,
 };
 pub use identity_key::{IdentityKey, IdentityKeyPair};
+pub use libsignal_core::curve::{KeyPair, PrivateKey, PublicKey};
+pub use libsignal_core::{
+    Aci, DeviceId, Pni, ProtocolAddress, ServiceId, ServiceIdFixedWidthBinaryBytes, ServiceIdKind,
+};
 pub use protocol::{
-    extract_decryption_error_message_from_serialized_content, CiphertextMessage,
-    CiphertextMessageType, DecryptionErrorMessage, KyberPayload, PlaintextContent,
-    PreKeySignalMessage, SenderKeyDistributionMessage, SenderKeyMessage, SignalMessage,
+    CiphertextMessage, CiphertextMessageType, DecryptionErrorMessage, KyberPayload,
+    PlaintextContent, PreKeySignalMessage, SenderKeyDistributionMessage, SenderKeyMessage,
+    SignalMessage, extract_decryption_error_message_from_serialized_content,
 };
 pub use ratchet::{
-    initialize_alice_session_record, initialize_bob_session_record, AliceSignalProtocolParameters,
-    BobSignalProtocolParameters,
+    AliceSignalProtocolParameters, BobSignalProtocolParameters, initialize_alice_session_record,
+    initialize_bob_session_record,
 };
 pub use sealed_sender::{
-    sealed_sender_decrypt, sealed_sender_decrypt_to_usmc, sealed_sender_encrypt,
-    sealed_sender_encrypt_from_usmc, sealed_sender_multi_recipient_encrypt,
-    sealed_sender_multi_recipient_encrypt_using_new_ephemeral_key_derivation, ContentHint,
-    SealedSenderDecryptionResult, SealedSenderV2SentMessage, SealedSenderV2SentMessageRecipient,
-    SenderCertificate, ServerCertificate, UnidentifiedSenderMessageContent,
+    ContentHint, SealedSenderDecryptionResult, SealedSenderV2SentMessage,
+    SealedSenderV2SentMessageRecipient, SenderCertificate, ServerCertificate,
+    UnidentifiedSenderMessageContent, sealed_sender_decrypt, sealed_sender_decrypt_to_usmc,
+    sealed_sender_encrypt, sealed_sender_encrypt_from_usmc, sealed_sender_multi_recipient_encrypt,
 };
 pub use sender_keys::SenderKeyRecord;
 pub use session::{process_prekey, process_prekey_bundle};
@@ -79,11 +77,13 @@ pub use session_cipher::{
 };
 pub use state::{
     GenericSignedPreKey, KyberPreKeyId, KyberPreKeyRecord, PreKeyBundle, PreKeyBundleContent,
-    PreKeyId, PreKeyRecord, SessionRecord, SignedPreKeyId, SignedPreKeyRecord,
+    PreKeyId, PreKeyRecord, SessionRecord, SessionUsabilityRequirements, SignedPreKeyId,
+    SignedPreKeyRecord,
 };
 pub use storage::{
-    Direction, IdentityKeyStore, InMemIdentityKeyStore, InMemKyberPreKeyStore, InMemPreKeyStore,
-    InMemRatchetKeyStore, InMemSenderKeyStore, InMemSessionStore, InMemSignalProtocolStore,
-    InMemSignedPreKeyStore, KyberPreKeyStore, PreKeyStore, ProtocolStore, RatchetKeyStore,
-    SenderKeyStore, SessionStore, SignedPreKeyStore,
+    Direction, IdentityChange, IdentityKeyStore, InMemIdentityKeyStore, InMemKyberPreKeyStore,
+    InMemPreKeyStore, InMemRatchetKeyStore, InMemSenderKeyStore, InMemSessionStore,
+    InMemSignalProtocolStore, InMemSignedPreKeyStore, KyberPreKeyStore, PreKeyStore, ProtocolStore,
+    RatchetKeyStore, SenderKeyStore, SessionStore, SignedPreKeyStore,
 };
+pub use timestamp::Timestamp;

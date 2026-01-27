@@ -6,8 +6,8 @@
 import Foundation
 import SignalFfi
 
-public class AuthCredentialPresentation: ByteArray {
-    public required init(contents: [UInt8]) throws {
+public class AuthCredentialPresentation: ByteArray, @unchecked Sendable {
+    public required init(contents: Data) throws {
         try super.init(contents, checkValid: signal_auth_credential_presentation_check_valid_contents)
     }
 
@@ -19,10 +19,10 @@ public class AuthCredentialPresentation: ByteArray {
         }
     }
 
-    public func getPniCiphertext() throws -> UuidCiphertext? {
+    public func getPniCiphertext() throws -> UuidCiphertext {
         return try withUnsafeBorrowedBuffer { buffer in
-            try invokeFnReturningOptionalVariableLengthSerialized {
-                signal_auth_credential_presentation_get_pni_ciphertext_or_empty($0, buffer)
+            try invokeFnReturningSerialized {
+                signal_auth_credential_presentation_get_pni_ciphertext($0, buffer)
             }
         }
     }

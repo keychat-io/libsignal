@@ -6,44 +6,91 @@
 import Foundation
 import SignalFfi
 
-public class ServerSecretParams: ByteArray {
+public class ServerSecretParams: NativeHandleOwner<SignalMutPointerServerSecretParams> {
     public static func generate() throws -> ServerSecretParams {
         return try self.generate(randomness: Randomness.generate())
     }
 
     public static func generate(randomness: Randomness) throws -> ServerSecretParams {
         return try randomness.withUnsafePointerToBytes { randomness in
-            try invokeFnReturningSerialized {
+            try invokeFnReturningNativeHandle {
                 signal_server_secret_params_generate_deterministic($0, randomness)
             }
         }
     }
 
-    public required init(contents: [UInt8]) throws {
-        try super.init(contents, checkValid: signal_server_secret_params_check_valid_contents)
+    public convenience init(contents: Data) throws {
+        let handle = try contents.withUnsafeBorrowedBuffer { contents in
+            try invokeFnReturningValueByPointer(.init()) {
+                signal_server_secret_params_deserialize($0, contents)
+            }
+        }
+        self.init(owned: NonNull(handle)!)
     }
 
-    public func getPublicParams() throws -> ServerPublicParams {
-        return try withUnsafePointerToSerialized { contents in
-            try invokeFnReturningSerialized {
-                signal_server_secret_params_get_public_params($0, contents)
+    required init(owned: NonNull<SignalMutPointerServerSecretParams>) {
+        super.init(owned: owned)
+    }
+
+    public func serialize() -> Data {
+        return failOnError {
+            try withNativeHandle { handle in
+                try invokeFnReturningData {
+                    signal_server_secret_params_serialize($0, handle.const())
+                }
             }
         }
     }
 
-    public func sign(message: [UInt8]) throws -> NotarySignature {
+    public func getPublicParams() throws -> ServerPublicParams {
+        return try withNativeHandle { contents in
+            try invokeFnReturningNativeHandle {
+                signal_server_secret_params_get_public_params($0, contents.const())
+            }
+        }
+    }
+
+    public func sign(message: Data) throws -> NotarySignature {
         return try self.sign(randomness: Randomness.generate(), message: message)
     }
 
-    public func sign(randomness: Randomness, message: [UInt8]) throws -> NotarySignature {
-        return try withUnsafePointerToSerialized { contents in
+    public func sign(randomness: Randomness, message: Data) throws -> NotarySignature {
+        return try withNativeHandle { contents in
             try randomness.withUnsafePointerToBytes { randomness in
                 try message.withUnsafeBorrowedBuffer { message in
                     try invokeFnReturningSerialized {
-                        signal_server_secret_params_sign_deterministic($0, contents, randomness, message)
+                        signal_server_secret_params_sign_deterministic($0, contents.const(), randomness, message)
                     }
                 }
             }
         }
+    }
+
+    override internal class func destroyNativeHandle(
+        _ handle: NonNull<SignalMutPointerServerSecretParams>
+    ) -> SignalFfiErrorRef? {
+        signal_server_secret_params_destroy(handle.pointer)
+    }
+}
+
+extension SignalMutPointerServerSecretParams: SignalMutPointer {
+    public typealias ConstPointer = SignalConstPointerServerSecretParams
+
+    public init(untyped: OpaquePointer?) {
+        self.init(raw: untyped)
+    }
+
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
+    }
+
+    public func const() -> Self.ConstPointer {
+        Self.ConstPointer(raw: self.raw)
+    }
+}
+
+extension SignalConstPointerServerSecretParams: SignalConstPointer {
+    public func toOpaque() -> OpaquePointer? {
+        self.raw
     }
 }

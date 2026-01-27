@@ -3,12 +3,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use curve25519_dalek::RistrettoPoint;
 use poksho::ShoApi;
+use zkcredential::RANDOMNESS_LEN;
 use zkcredential::endorsements::*;
 use zkcredential::sho::ShoExt;
-use zkcredential::RANDOMNESS_LEN;
 
 fn endorsement_flow(c: &mut Criterion) {
     let mut group = c.benchmark_group("endorsements");
@@ -27,7 +27,14 @@ fn endorsement_flow(c: &mut Criterion) {
     let raw_decrypt_key = blinding_key.invert();
     let todays_public_key = root_key.public_key().derive_key(info_sho.clone());
 
-    for count in [1, 5, 10, 100, 1000] {
+    // Use cfg!(debug_assertions) as a proxy for "no optimizations".
+    let counts: &[usize] = if cfg!(debug_assertions) {
+        &[50]
+    } else {
+        &[1, 5, 10, 100, 1000]
+    };
+
+    for &count in counts {
         let points = inputs.iter().take(count).cloned();
         let issue_endorsements =
             || EndorsementResponse::issue(points.clone(), &todays_key, [43; RANDOMNESS_LEN]);
@@ -37,7 +44,10 @@ fn endorsement_flow(c: &mut Criterion) {
         });
 
         let receive_endorsements = |issued: EndorsementResponse| {
-            issued.receive(points.clone(), &todays_public_key).unwrap()
+            issued
+                .receive(points.clone(), &todays_public_key)
+                .unwrap()
+                .decompressed
         };
 
         group.bench_function(BenchmarkId::new("receive", count), |b| {

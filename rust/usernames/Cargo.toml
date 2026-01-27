@@ -5,36 +5,42 @@
 
 [package]
 name = "usernames"
-authors = ["Signal Messenger LLC"]
+authors.workspace = true
+license.workspace = true
+rust-version = "1.85"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "A zero-knowledge usernames library"
-license = "AGPL-3.0-only"
+
+[lints]
+workspace = true
 
 [dependencies]
-poksho = { path = "../poksho" }
-signal-crypto = { path = "../crypto" }
+poksho = { workspace = true }
+signal-crypto = { workspace = true }
 
-curve25519-dalek = { version = "4.0", features = ["digest"] }
-hkdf = "0.12"
-hmac = "0.12"
-sha2 = "0.10"
-displaydoc = "0.2"
-lazy_static = "1.4.0"
-log = "0.4"
-prost = "0.12"
-rand = "0.8"
-subtle = "2.5.0"
-thiserror = "1.0.40"
+curve25519-dalek = { workspace = true, features = ["digest"] }
+displaydoc = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+log = { workspace = true }
+prost = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-zkgroup = { path = "../zkgroup" }
-proptest = "1.0"
-criterion = "0.5"
+zkgroup = { workspace = true }
+
+base64 = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+criterion = { workspace = true }
+proptest = { workspace = true }
 
 [[bench]]
 name = "usernames_benchmarks"
 harness = false
 
 [build-dependencies]
-prost-build = "0.12"
+prost-build = { workspace = true }
