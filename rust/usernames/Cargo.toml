@@ -8,7 +8,7 @@ name = "usernames"
 authors.workspace = true
 license.workspace = true
 rust-version = "1.85"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A zero-knowledge usernames library"
 

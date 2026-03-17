@@ -5,7 +5,7 @@
 
 [package]
 name = "poksho"
-version = "0.7.0"
+version = "0.7.1"
 authors.workspace = true
 license.workspace = true
 edition = "2024"
